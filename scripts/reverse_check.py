@@ -39,6 +39,8 @@ DB = PROJ / "app/db.py"
 PROBE = PROJ / "app/services/probe.py"
 SEED = PROJ / "app/seed_data.py"
 CLEAN = PROJ / "app/services/clean.py"
+NORMALIZE = PROJ / "app/services/normalize.py"
+SCHED = PROJ / "scripts/collect_scheduled.sh"
 
 # (说明, 文件, 原文锚点, 改坏成)
 BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
@@ -166,6 +168,28 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "        return True\n"
         '    return len(re.findall(r"(?:^|\\s)[1-9][.、)）]\\s*\\S", title)) >= 3',
     ),
+    (
+        "容量抽取器失效（容量消歧全部退化）",
+        NORMALIZE,
+        '    return {int(m.group(1)) for m in _CAPACITY_IN_TEXT.finditer(text or "")}',
+        "    return set()",
+    ),
+    (
+        "容量消歧的底线被去掉（无容量标题会随机漂移）",
+        NORMALIZE,
+        "            if len(matched) == 1:\n"
+        "                return matched[0]\n"
+        "        return None",
+        "            if len(matched) >= 1:\n"
+        "                return matched[0]\n"
+        "        return candidates[0]",
+    ),
+    (
+        "看门狗退回单 PID 广播（Chrome / node 驱动会变孤儿）",
+        SCHED,
+        'kill -TERM -- "-$pgid" 2>/dev/null',
+        'kill -TERM "$COLLECT_PID" 2>/dev/null',
+    ),
 ]
 
 
@@ -193,7 +217,7 @@ def main() -> int:
             shutil.copy2(bak, path)
 
     try:
-        for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN}:
+        for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak

@@ -185,6 +185,14 @@ class WorkerConfig:
     # 短生命周期开关。False = 回退到"常驻浏览器"的老行为（会话结束不关闭）。
     # 留这个开关是为了**出问题能一键回退**，不是留两条长期维护路径。
     ephemeral: bool = True
+    # Playwright **全局显式超时**（毫秒）。所有 page 操作都受它兜底。
+    #
+    # 为什么必须显式设：Playwright 默认 30s，但并非所有内部等待都走它。
+    # 实测（2026-09-21）：CDP 的 WebSocket 断开后底层调用**没有超时**，
+    # 进程一挂就是 3 小时 27 分，对 SIGTERM 也无响应。
+    # 45s 比各采集器的单次导航超时（30~40s）略宽，不会误杀正常的慢页面。
+    default_timeout_ms: int = 45000
+    default_navigation_timeout_ms: int = 45000
 
     @classmethod
     def from_env(cls) -> "WorkerConfig":
@@ -206,6 +214,8 @@ class WorkerConfig:
             port=_int("DIYPRICE_CDP_PORT", 9222),
             max_tasks=_int("DIYPRICE_WORKER_MAX_TASKS", 60),
             max_seconds=_float("DIYPRICE_WORKER_MAX_SECONDS", 900.0),
+            default_timeout_ms=_int("DIYPRICE_PLAYWRIGHT_TIMEOUT_MS", 45000),
+            default_navigation_timeout_ms=_int("DIYPRICE_PLAYWRIGHT_NAV_TIMEOUT_MS", 45000),
             park_window=os.getenv("DIYPRICE_KEEP_BROWSER_HIDDEN", "1") != "0",
             block_heavy=os.getenv("DIYPRICE_BLOCK_HEAVY", "1") != "0",
             wait_release=os.getenv("DIYPRICE_WAIT_MEMORY_RELEASE", "1") != "0",
@@ -457,6 +467,24 @@ class ChromiumWorker:
                     time.sleep(0.5)
                     continue
                 self.started_at = time.monotonic()
+
+                # 全局显式超时 —— 所有 page 操作都受它兜底。
+                #
+                # 为什么必须显式设：Playwright 默认 30s，但**不是所有内部等待
+                # 都走它**。实测教训（2026-09-21）：采集途中 Mac 睡眠后 CDP 的
+                # WebSocket 断了，底层调用**没有超时**，进程一挂就是 3 小时 27 分，
+                # 对 SIGTERM 也无响应，最后只能 SIGKILL。
+                # 设成 45s：比单次导航超时（各采集器 page_timeout 30~40s）略宽，
+                # 不会误杀正常的慢页面，又能在连接半死时及时抛错。
+                try:
+                    ctx = self._browser.contexts[0] if self._browser.contexts else None
+                    if ctx is not None:
+                        ctx.set_default_timeout(self.config.default_timeout_ms)
+                        ctx.set_default_navigation_timeout(
+                            self.config.default_navigation_timeout_ms
+                        )
+                except Exception as exc:  # noqa: BLE001 —— 设超时失败不该拦住采集
+                    logger.warning("设置 Playwright 全局超时失败：%s", str(exc)[:90])
 
                 # 每次启动都用 CDP 重新停靠一次窗口。
                 #

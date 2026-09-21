@@ -98,7 +98,7 @@ log "──────── 采集轮次开始 ────────"
 #    搜索打进了风控（首页正常、搜索页返回空），恢复要按小时算。宁可慢，别被封。
 log "轮转采集：jd/pdd/xianyu（仅显卡+CPU · 闲鱼配额 15）"
 
-# 硬超时看门狗。
+# 硬超时看门狗（**进程组级**）。
 #
 # 为什么必须有：采集走 CDP 驱动真实浏览器，一旦某个等待卡在网络 I/O 上
 # （典型场景：采集途中 Mac 睡眠，CDP 的 WebSocket 断了但调用没有超时），
@@ -106,6 +106,17 @@ log "轮转采集：jd/pdd/xianyu（仅显卡+CPU · 闲鱼配额 15）"
 #   · 占着单实例锁 → 后续轮次全被跳过
 #   · 占着 SQLite 写事务 → 新采集 `database is locked`
 # 正常一轮约 9~10 分钟，30 分钟足够宽裕。
+#
+# ⚠️ 2026-09-21 实测过"只对主进程 PID 发信号"的失败：
+#   17:00 那轮卡了 3 小时 27 分，看门狗子 shell 明明执行完退出了，
+#   子进程却还活着（而且对 SIGTERM 无响应）。原因未定位，但根因方向明确 ——
+#   主进程不是唯一的受害者：它衍生的 Chrome、Playwright 的 node 驱动
+#   都不受单一 PID 的信号影响，全都变成孤儿。
+#
+# 所以改成**按进程组广播**：
+#   · `app.cli collect` 启动时会调 os.setpgrp() 自建进程组（见 cli.py），
+#     浏览器用 start_new_session=False 继承该组，node 驱动同理
+#   · 于是 `kill -- -PGID` 一次覆盖全树
 MAX_COLLECT_SECONDS=1800
 DIYPRICE_FOCUS_CATEGORY=gpu,cpu \
 DIYPRICE_XIANYU_LIMIT=15 \
@@ -116,11 +127,34 @@ COLLECT_PID=$!
 # 顺序写反的话它读到的永远是空值，看门狗就形同虚设。
 (
   sleep "$MAX_COLLECT_SECONDS"
-  if kill -0 "$COLLECT_PID" 2>/dev/null; then
-    echo "[$(date '+%F %T')] ⚠️ 采集超过 ${MAX_COLLECT_SECONDS}s 仍未结束（PID $COLLECT_PID），判定卡死，终止它以免拖垮后续轮次" >> "$LOG"
+
+  # PGID **在这里现读**，不能沿用启动时读到的值：
+  # Python 入口会在启动后调 os.setpgrp() 把自己变成新组的组长，
+  # 启动瞬间读到的是旧组（= shell 自己的组），拿它去 kill 会**误杀自己**。
+  pgid="$(ps -o pgid= -p "$COLLECT_PID" 2>/dev/null | tr -d ' ')"
+  [ -z "$pgid" ] && exit 0                      # 进程早就正常结束了
+
+  shell_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+  if [ "$pgid" = "$shell_pgid" ]; then
+    # 兜底：进程组没分开（比如 setpgrp 失败）。此时按组广播会连自己一起杀，
+    # 只能退回单 PID，并把这个事实记下来 —— 这是配置问题，不该静默。
+    echo "[$(date '+%F %T')] ⚠️ 采集超过 ${MAX_COLLECT_SECONDS}s 仍未结束，但进程组未隔离（PGID=$pgid 与本脚本同组），只能按单 PID 终止" >> "$LOG"
     kill -TERM "$COLLECT_PID" 2>/dev/null
-    sleep 15
+    sleep 5
     kill -KILL "$COLLECT_PID" 2>/dev/null
+    exit 0
+  fi
+
+  echo "[$(date '+%F %T')] ⚠️ 采集超过 ${MAX_COLLECT_SECONDS}s 仍未结束（PID $COLLECT_PID / PGID $pgid），判定卡死，向**整个进程组**广播终止信号" >> "$LOG"
+
+  # 第一步：软终止整个组（python + Chrome + node 驱动）
+  kill -TERM -- "-$pgid" 2>/dev/null
+  # 第二步：5 秒缓冲窗口
+  sleep 5
+  # 第三步：组内仍有活跃进程就直接硬杀
+  if kill -0 -- "-$pgid" 2>/dev/null; then
+    echo "[$(date '+%F %T')] ⚠️ 软终止 5s 后组内仍有存活进程，改为 SIGKILL 广播" >> "$LOG"
+    kill -KILL -- "-$pgid" 2>/dev/null
   fi
 ) &
 WATCHDOG_PID=$!

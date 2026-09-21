@@ -983,6 +983,128 @@ def test_wall_clock_limit() -> None:
         check("设 0 表示关闭兜底", wall_clock_limit() == 0.0)
 
 
+def test_capacity_disambiguation() -> None:
+    """显卡容量消歧：型号与容量分离时，**禁止随机漂移**。
+
+    背景：像 "RTX4060 Ti" 这种"去容量"别名，8G 版和 16G 版**都有** ——
+    改造前是"命中即返回"，等于按字典序随机挑一个。实测把
+    "微星RTX4060 Ti魔龙X Trio 8G" 判成了 16G 版。
+
+    这条断言的**底线**是最后两条：标题没写容量时，必须放弃入库，
+    而不是随便挑一个把错容量写进库里 —— 错数据比缺数据更难发现。
+    """
+    from types import SimpleNamespace
+
+    from app.services.normalize import (
+        ModelMatcher,
+        extract_capacities,
+        model_capacity,
+    )
+
+    # ---- 容量抽取器 ----
+    check("抽取 '8G' → {8}", extract_capacities("微星RTX4060 Ti魔龙X Trio 8G显卡") == {8})
+    check("抽取 '12g' → {12}", extract_capacities("RTX3080 12g 星耀") == {12})
+    check("抽取 'O16G'（电商常见写法，容量紧跟字母）→ {16}",
+          extract_capacities("华硕DUAL GeForce RTX 5060 Ti O16G") == {16})
+    check("抽取 'OC16G' → {16}",
+          extract_capacities("索泰RTX5060Ti月白OC16G电竞") == {16})
+    check("抽取 'O8G' → {8}", extract_capacities("华硕ATS-RTX5060TI-O8G") == {8})
+    check("无容量标题 → 空集", extract_capacities("自用 3080 出，成色好") == set())
+    check("左侧断言挡住从长数字里截断（'13080G' 不得抽出 80）",
+          13080 % 10 != 0 or extract_capacities("13080G") == set(),
+          str(sorted(extract_capacities("13080G"))))
+
+    # ---- 型号主容量（取第一个）----
+    check("型号 'RTX 4060 Ti 8G' → 8", model_capacity("RTX 4060 Ti 8G") == 8)
+    check("型号 'RTX 3080 12G' → 12", model_capacity("RTX 3080 12G") == 12)
+    check("型号 'DDR5 32GB 16GB×2 6000 C30' → 32（取第一个=整条容量）",
+          model_capacity("DDR5 32GB 16GB×2 6000 C30") == 32)
+    check("型号 'i5-12400F' 无容量 → None", model_capacity("i5-12400F") is None)
+
+    # ---- 端到端决断 ----
+    # ⚠️ 必须用**真实别名**（build_aliases），不能只拿型号本身当别名：
+    #    容量消歧只在"多个容量版本共享同一条去容量别名"（如 "RTX4060 Ti"）
+    #    时才会触发，用型号本身作别名根本构造不出这个平局。
+    from app.seed_data import build_aliases
+
+    def matcher_for(*models: str):
+        prods = [
+            SimpleNamespace(id=i, model=m, aliases=build_aliases(m), category="gpu")
+            for i, m in enumerate(models)
+        ]
+        return ModelMatcher(prods), {i: m for i, m in enumerate(models)}
+
+    pairs = [
+        ("微星RTX4060 Ti魔龙X Trio 8G显卡", "RTX 4060 Ti 8G"),
+        ("七彩虹RTX4060 Ti 16G 战斧豪华版", "RTX 4060 Ti 16G"),
+        ("华硕RTX 3080 10G 显卡 三风扇", "RTX 3080 10G"),
+        ("影驰3080 12g星耀 锁算力", "RTX 3080 12G"),
+        ("华硕ATS-RTX5060TI-O8G 显卡", "RTX 5060 Ti 8G"),
+        ("索泰RTX5060Ti月白OC16G电竞", "RTX 5060 Ti 16G"),
+    ]
+    for title, want in pairs:
+        m, ids = matcher_for("RTX 4060 Ti 8G", "RTX 4060 Ti 16G",
+                             "RTX 3080 10G", "RTX 3080 12G",
+                             "RTX 5060 Ti 8G", "RTX 5060 Ti 16G")
+        got = ids.get(m.match(title, category=None))
+        check(f"容量消歧：{title[:26]}… → {want}", got == want, f"实际 {got}")
+
+    # ---- 底线：无容量 / 容量矛盾 → 放弃入库（绝不漂移）----
+    m, ids = matcher_for("RTX 3080 10G", "RTX 3080 12G")
+    check("底线：标题无容量（'自用 3080 出'）→ 放弃入库，不漂移到 10G/12G",
+          m.match("自用 3080 出，成色好，无拆无修", category=None) is None)
+
+    m, ids = matcher_for("RTX 5060 Ti 8G", "RTX 5060 Ti 16G")
+    check("底线：标题同时列了 16G 与 8G → 放弃入库，不随便挑",
+          m.match("耕升RTX5060Ti 踏雪 16G/8G 游戏电竞", category=None) is None)
+
+    # ---- 不误伤：单候选 / 同容量候选仍照常返回 ----
+    m, ids = matcher_for("RTX 3070 Ti 8G")
+    check("单候选不受影响：唯一型号照常命中",
+          ids.get(m.match("影驰RTX3070 Ti 8G显卡", category=None)) == "RTX 3070 Ti 8G")
+
+    m, ids = matcher_for("RTX 3080 12G", "RTX 3080 12G 白色版")
+    check("同容量候选不受影响：容量一致时按最长关键词定，不返回 None",
+          m.match("影驰3080 12g星耀", category=None) is not None)
+
+    m, ids = matcher_for("i5-12400F")
+    check("无容量型号（CPU）不受影响",
+          ids.get(m.match("i5 12400F 散片", category=None)) == "i5-12400F")
+
+
+def test_watchdog_group_broadcast() -> None:
+    """看门狗必须**按进程组广播**，不能退回单 PID。
+
+    这是 shell 层的机制，Python 单测覆盖不到，所以用一条**文本断言**守住。
+    为什么值得守（2026-09-21 实测）：只对主进程 PID 发信号是**失败过**的 ——
+    17:00 那轮主进程对 SIGTERM 无响应，衍生的 Chrome 与 Playwright 的
+    node 驱动更是没人管，全部变成孤儿，卡了 3 小时 27 分，
+    连带 18/19/20 点三轮全被单实例锁挡掉。
+
+    实测组广播有效：组内 10 个进程 → TERM 后剩 2 个（正是无响应那类）
+    → KILL 后**组完全清空**。
+    """
+    from app.cli import _own_process_group
+
+    script_path = Path(__file__).resolve().parent / "collect_scheduled.sh"
+    script = script_path.read_text(encoding="utf-8")
+
+    check("看门狗向进程组广播 SIGTERM",
+          'kill -TERM -- "-$pgid"' in script)
+    check("看门狗有 5 秒缓冲后升级为 SIGKILL",
+          'kill -KILL -- "-$pgid"' in script)
+    check("PGID 在**超时后现读**（沿用启动时的旧组会误杀自己）",
+          'pgid="$(ps -o pgid= -p "$COLLECT_PID"' in script)
+    check("有「绝不杀自己所在组」的保护",
+          "shell_pgid" in script and '"$pgid" = "$shell_pgid"' in script)
+    check("进程组未隔离时退回单 PID 并记日志（不静默）",
+          "进程组未隔离" in script)
+
+    with mock.patch.dict(os.environ, {"DIYPRICE_OWN_PROCESS_GROUP": "0"}):
+        check("DIYPRICE_OWN_PROCESS_GROUP=0 时不新建进程组（手动跑保留 Ctrl-C）",
+              _own_process_group() is False)
+
+
 # ====================================================================== 主流程
 
 def main() -> int:
@@ -1002,7 +1124,9 @@ def main() -> int:
         test_db_pragmas,
         test_stale_log_threshold,
         test_wall_clock_limit,
+        test_watchdog_group_broadcast,
         test_alias_variants,
+        test_capacity_disambiguation,
         test_clean_noise_filters,
         test_zero_yield_reason,
     )

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 
 from .config import APP_VERSION, HOST, PORT
@@ -28,6 +29,37 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _own_process_group() -> bool:
+    """把采集进程变成**新进程组**的组长，好让看门狗能一次干掉整棵树。
+
+    为什么需要（2026-09-21 实测）
+    ----------------------------
+    17:00 那轮采集卡在 Playwright/CDP 等待里 3 小时 27 分。shell 看门狗只对
+    **主进程 PID** 发信号，结果：主进程对 SIGTERM 无响应、衍生的 Chrome 与
+    Playwright 的 node 驱动更是没人管，全部变成孤儿。
+
+    进程组是内核层面的归属关系，**组内任一进程死掉都不会改变其它成员的组号**
+    —— 所以 `kill -TERM -- -PGID` 能一次覆盖 python + Chrome + node 驱动全树。
+    前提是它们真的在同一个组里：浏览器那边刻意用了
+    `start_new_session=False`（见 browser_worker），所以会继承我们的组。
+
+    ⚠️ 只在**非交互**场景启用。一旦脱离终端的前台进程组，Ctrl-C 就送不到
+       这里了 —— 手动跑采集时那样很难受。所以交互式终端下默认跳过。
+
+    返回是否真的新建了进程组。
+    """
+    mode = os.getenv("DIYPRICE_OWN_PROCESS_GROUP", "auto").strip().lower()
+    if mode == "0":
+        return False
+    if mode != "1" and sys.stdin.isatty():
+        return False
+    try:
+        os.setpgrp()          # setpgid(0, 0)
+    except OSError:
+        return False
+    return True
+
+
 def cmd_init(args) -> int:
     init_db()
     with session_scope() as session:
@@ -41,6 +73,7 @@ def cmd_init(args) -> int:
 
 
 def cmd_backfill(args) -> int:
+    _own_process_group()      # 回填同样会拉起浏览器，同样需要能整组收掉
     init_db()
     result = run_pipeline(
         day=None,
@@ -55,6 +88,12 @@ def cmd_backfill(args) -> int:
 
 
 def cmd_collect(args) -> int:
+    # 自建进程组：让看门狗能一次干掉 python + Chrome + Playwright 驱动全树。
+    # 必须在**任何子进程产生之前**调用（浏览器、node 驱动都要继承这个组）。
+    if _own_process_group():
+        logging.getLogger("diyprice.cli").info(
+            "已新建进程组（PGID=%d）—— 看门狗可按组广播信号", os.getpgrp()
+        )
     init_db()
     result = run_pipeline(
         sources=args.sources.split(",") if args.sources else None,
