@@ -483,7 +483,7 @@ def main_browser_pid(profile_dir: Path | str) -> int | None:
     return None
 
 
-def hide_browser_app(profile_dir: Path | str | None = None) -> bool:
+def hide_browser_app(profile_dir: Path | str | None = None, pid: int | None = None) -> bool:
     """把受管 Chrome 这个**应用**藏起来，让系统把焦点还给上一个应用。
 
     为什么光把窗口挪到屏幕外不够
@@ -504,7 +504,7 @@ def hide_browser_app(profile_dir: Path | str | None = None) -> bool:
     ⚠️ 必须按 **unix id** 定位进程，绝不能用 `process "Google Chrome"` ——
        后者会命中**用户日常浏览器的进程**，把用户自己开的浏览器一起隐藏掉。
     """
-    pid = main_browser_pid(profile_dir or BROWSER_PROFILE)
+    pid = pid or main_browser_pid(profile_dir or BROWSER_PROFILE)
     if not pid:
         return False
     script = (
@@ -543,20 +543,24 @@ def _keep_hidden(profile_dir: Path | str, seconds: float, restore_to: str | None
        唯一能做的是尽快把它藏掉，所以这一段要盯紧。
     """
     start = time.time()
+    # ⚠️ PID 只查一次。`main_browser_pid()` 每次都 spawn 一个 `ps`（约 0.1~0.3s），
+    #    放在循环里会让**每一轮**都慢到约 1 秒 —— 而焦点被抢的窗口期正是
+    #    由这个循环周期决定的（实测抢了约 2 秒）。
+    pid = main_browser_pid(profile_dir)
+    if not pid:
+        return
+    round_no = 0
     while time.time() - start < seconds:
-        hide_browser_app(profile_dir)
-        # 归还焦点的判据：**当前最前台不是用户原来的应用，且它要么是 Chrome、
-        # 要么取不到名字**。取不到名字也算 —— 启动瞬间 System Events 偶尔
-        # 会返回空串，旧写法只判 == "Google Chrome" 会把这种情况漏掉，
-        # 于是焦点被占着不还（实测占过 2 秒）。
-        #
-        # 不无条件归还：若用户在这 12 秒里自己切到了别的应用，就不动他。
-        current = frontmost_app_name()
-        if restore_to and current != restore_to and (
-            current is None or current in ("", "Google Chrome")
-        ):
+        round_no += 1
+        hide_browser_app(profile_dir, pid=pid)
+        # 归还焦点：
+        #   · 前 3 轮**无条件**归还 —— 这几轮正好覆盖窗口创建的那一刻，
+        #     任何焦点偏离都必然是我们造成的，多一次判断只是白白拉长周期
+        #   · 之后改为有条件（只在最前台是 Chrome / 取不到名字时还），
+        #     这样用户在这 12 秒里主动切到别的应用就不会被打断
+        if restore_to and (round_no <= 3 or frontmost_app_name() in (None, "", "Google Chrome")):
             restore_front_app(restore_to)
-        time.sleep(0.25 if time.time() - start < 4.0 else 0.8)
+        time.sleep(0.2 if time.time() - start < 4.0 else 0.8)
 
 
 def frontmost_app_name() -> str | None:
