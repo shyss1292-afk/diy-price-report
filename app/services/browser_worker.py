@@ -56,6 +56,8 @@ from pathlib import Path
 from .session import (
     BROWSER_PROFILE,
     build_launch_args,
+    frontmost_app_name,
+    hide_browser_app_soon,
     park_window_of,
     profile_pids,
     profile_rss_mb,
@@ -420,6 +422,8 @@ class ChromiumWorker:
         args = build_launch_args(
             binary, self.config.profile_dir, self.config.port, self.config.park_window
         )
+        # 启动前记下用户正在用的应用 —— 浏览器一起来就会把它顶掉。
+        prev_app = frontmost_app_name() if self.config.park_window else None
         subprocess.Popen(
             args,
             stdout=subprocess.DEVNULL,
@@ -429,6 +433,12 @@ class ChromiumWorker:
             # 变成无人认领的孤儿。短生命周期模型下它本来就该随会话消失。
             start_new_session=False,
         )
+
+        # 立刻藏起来（不等 CDP 就绪）并把焦点还给用户原来的应用 ——
+        # Chrome 一启动就会成为前台应用，而 CDP 要 3~5 秒才可用，
+        # 那几秒就是"打断打字"的窗口。
+        if self.config.park_window:
+            hide_browser_app_soon(self.config.profile_dir, restore_to=prev_app)
 
         deadline = time.time() + 25.0
         while time.time() < deadline:
@@ -459,7 +469,7 @@ class ChromiumWorker:
                     ctx = self._browser.contexts[0]
                     # 显式挑一个页面传进去 —— 此后各步骤都只认这一个页面
                     if ctx.pages:
-                        park_window_of(ctx.pages[0])
+                        park_window_of(ctx.pages[0], self.config.profile_dir)
 
                 _, rss = profile_rss_mb(self.config.profile_dir)
                 logger.info(
@@ -659,7 +669,7 @@ class ChromiumWorker:
                 # —— 后者会自己去 ctx.pages[0] 挑页面，可能挑到 about:blank
                 # 或刚关闭的僵尸页，实测会让采集页报
                 # "Target page, context or browser has been closed"。
-                park_window_of(page)
+                park_window_of(page, self.config.profile_dir)
         except Exception:
             try:
                 page.close()

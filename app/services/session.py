@@ -22,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -238,8 +239,34 @@ def build_launch_args(
         # 磁盘缓存外置到临时目录，见 DISK_CACHE_DIR 的说明。
         # 这是"防膨胀"的第一道：从源头就不让它写进 profile。
         f"--disk-cache-dir={disk_cache_dir or DISK_CACHE_DIR}",
-        # Translate 是唯一会干扰采集的内置特性（弹条会改变 DOM 结构）
-        "--disable-features=Translate",
+    ]
+
+    # ---- C) 进程模型瘦身（8G 机器，2026-09-21 加）----
+    #
+    # ⚠️ 与「抗指纹底线」不冲突：下面这些**只改进程/缓存模型，页面内不可见**，
+    #    和 --disable-gpu 那种"削弱渲染能力"是两回事。
+    #    每一项都用 `scripts/browser_flags_eval.py` 对照实测过 ——
+    #    WebGL / WebGL2 / Canvas2D 回读 / navigator.webdriver / plugins / DPR
+    #    全部保持原样（探针输出见该脚本汇总表）。
+    #
+    # 实测（空载，进程数是指标，RSS 单次读数噪声 ±25%）：
+    #     基线                 8 进程 / 4 渲染 / 734 MB
+    #     加下面这些            6 进程 / 2 渲染 / 572 MB
+    # 真实采集峰值：1123 MB / 11 进程 → 969 MB / 8 进程（-154 MB）
+    args += [
+        # 渲染进程上限。实测空载渲染进程 4 → 2。
+        # 我们始终单页串行采集，不需要多渲染进程并行。
+        "--renderer-process-limit=1",
+        # 静音：禁用音频模块（采集不涉及声音，也没有理由出声）
+        "--mute-audio",
+        # 合并所有 disable-features（**只能出现一次**，重复给会被后者覆盖）
+        "--disable-features=" + ",".join([
+            "Translate",                    # 翻译弹条会改 DOM，唯一干扰采集的内置特性
+            "BackForwardCache",             # 前进后退缓存会整页留内存，而我们从不后退
+            "CalculateNativeWinOcclusion",  # 窗口遮挡计算（窗口在屏幕外，算了也没用）
+            "SpareRendererForSitePerProcess",  # 预启动的备用渲染进程，白占 ~90 MB
+            "AudioServiceOutOfProcess",     # 音频服务并入主进程，少一个进程
+        ]),
     ]
 
     if park_window:
@@ -252,6 +279,22 @@ def build_launch_args(
     else:
         # 登录流程：窗口要在屏内、用户能看见二维码
         args += ["--window-size=1280,900"]
+
+    # 试验用逃生口：`DIYPRICE_EXTRA_LAUNCH_ARGS="--mute-audio --xxx"`。
+    #
+    # 存在的理由：验证一个新参数能不能省内存/会不会伤指纹，需要**不改代码**
+    # 就能对照实验（见 `scripts/browser_flags_eval.py`）。改代码试参数再回滚，
+    # 很容易把临时改动留在生产路径上。
+    #
+    # ⚠️ 这里能塞进任何参数，包括下面"故意不加"清单里那些**会毁掉指纹**的。
+    #    它只用于对照实验，**不要写进任何自动化脚本或 plist**。
+    #
+    # ⚠️ 必须在 `about:blank` **之前**插入 —— 位置参数（要打开的 URL）
+    #    放到最后，否则后续参数会被当成 URL 处理。
+    extra = os.getenv("DIYPRICE_EXTRA_LAUNCH_ARGS", "").strip()
+    if extra:
+        logger.warning("⚠️ 检测到 DIYPRICE_EXTRA_LAUNCH_ARGS，追加启动参数：%s", extra)
+        args.extend(extra.split())
 
     args.append("about:blank")
 
@@ -272,6 +315,14 @@ def build_launch_args(
     #       会把 navigator.webdriver 置为 true
     #   --disable-images / --blink-settings=imagesEnabled=false
     #       图片是滑块验证码的载体，禁掉等于废掉验证码
+    #
+    #   --disable-dev-shm-usage
+    #       这是 **Linux 专属**参数（改 /dev/shm 用量），macOS 上是空操作。
+    #       本项目跑在 macOS，加了只会让人以为优化过。
+    #   --no-activate
+    #       **Chrome 没有这个参数**（`chrome://flags` 与源码里都不存在）。
+    #       窗口不抢焦点是靠 `--window-position` 挪到屏幕外 + CDP 停靠实现的，
+    #       见 OFFSCREEN_X / park_window_of。
     return args
 
 
@@ -364,6 +415,9 @@ def launch_browser(wait_seconds: float = 20.0, force: bool = False, park: bool =
         raise RuntimeError("未找到可用的 Chromium 内核浏览器（Chrome / Edge / Chromium / Brave）")
 
     BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
+    # 启动前记下用户正在用的应用 —— 浏览器一起来就会把它顶掉，
+    # 必须显式还回去（见 restore_front_app）。
+    prev_app = frontmost_app_name() if park else None
     subprocess.Popen(
         build_launch_args(binary, BROWSER_PROFILE, CDP_PORT, park_window=park),
         stdout=subprocess.DEVNULL,
@@ -375,12 +429,21 @@ def launch_browser(wait_seconds: float = 20.0, force: bool = False, park: bool =
         start_new_session=True,
     )
 
+    # 立刻藏起来（不等 CDP 就绪）—— 见 hide_browser_app_soon 的说明。
+    # park=False 是登录流程，窗口必须让用户看得见，不能藏。
+    if park:
+        hide_browser_app_soon(BROWSER_PROFILE, restore_to=prev_app)
+
     deadline = time.time() + wait_seconds
     while time.time() < deadline:
         if cdp_alive(timeout=1.0):
             time.sleep(1.0)          # 给 CDP 端点一点启动时间
             if park:
                 park_browser_window()
+                # 光挪到屏幕外挡不住 macOS 把新应用激活为前台（实测），
+                # 必须再藏一次把焦点还回去。登录流程（park=False）不能藏 ——
+                # 用户要看得见窗口才能扫码。
+                hide_browser_app(BROWSER_PROFILE)
             return True
         time.sleep(0.5)
     return False
@@ -398,6 +461,181 @@ OFFSCREEN_X = -3000
 OFFSCREEN_Y = 5000
 PARK_WIDTH = 1280
 PARK_HEIGHT = 900
+
+
+def main_browser_pid(profile_dir: Path | str) -> int | None:
+    """受管 Chrome 的**主进程** PID（命令行里不含 `--type=` 的那个）。"""
+    out = subprocess.run(["ps", "-eo", "pid=,command="], capture_output=True, text=True).stdout
+    marker = f"--user-data-dir={profile_dir}"
+    for line in out.splitlines():
+        if marker not in line:
+            continue
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid, command = parts
+        if "--type=" in command:      # renderer / gpu / utility 子进程
+            continue
+        try:
+            return int(pid)
+        except ValueError:
+            continue
+    return None
+
+
+def hide_browser_app(profile_dir: Path | str | None = None) -> bool:
+    """把受管 Chrome 这个**应用**藏起来，让系统把焦点还给上一个应用。
+
+    为什么光把窗口挪到屏幕外不够
+    ----------------------------
+    `--window-position=-3000,5000` 只让窗口**看不见**，并不能阻止 macOS 把
+    新启动的 GUI 应用**激活为前台**。实测（2026-09-21，前台应用采样）：
+
+        启动前：  Electron ×4
+        第 1 次： 启动后 Google Chrome ×3 → Electron ×16
+        第 2 次： 启动后 Google Chrome ×18（一直保持）
+
+    **窗口在屏幕外，键盘输入照样被抢走** —— 这才是"后台采集打断打字"的真因。
+    顺带排除了两个看起来该有用的办法：`open -g`（后台打开）实测**无效**
+    （21/23 采样仍被抢）；`--disable-gpu` 之类更不用谈（见 build_launch_args）。
+
+    按 PID 隐藏有效：隐藏后前台立刻回到上一个应用，且 CDP / 采集不受影响。
+
+    ⚠️ 必须按 **unix id** 定位进程，绝不能用 `process "Google Chrome"` ——
+       后者会命中**用户日常浏览器的进程**，把用户自己开的浏览器一起隐藏掉。
+    """
+    pid = main_browser_pid(profile_dir or BROWSER_PROFILE)
+    if not pid:
+        return False
+    script = (
+        'tell application "System Events"\n'
+        f'  set target to first application process whose unix id is {int(pid)}\n'
+        '  if visible of target is true then set visible of target to false\n'
+        'end tell'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=8
+        )
+        return proc.returncode == 0
+    except Exception as exc:  # noqa: BLE001 —— 藏窗口失败不该影响采集
+        logger.debug("隐藏浏览器应用失败（不影响采集）：%s", str(exc)[:90])
+        return False
+
+
+def _keep_hidden(profile_dir: Path | str, seconds: float, restore_to: str | None = None) -> None:
+    """启动后一段时间内**反复**隐藏 + 归还焦点。
+
+    单次隐藏挡不住：Chrome 的启动序列是
+        fork(1s) → 建窗口(3s) → CDP 就绪(5s) → 建标签页(5s+)
+    每一步都会让 macOS 把它重新激活为前台。实测只在启动时藏一次，
+    焦点会被占住**整轮采集**（113 秒），而不是几秒。
+
+    所以启动后 12 秒内反复「藏 + 把焦点还回去」。
+
+    ⚠️ 归还焦点是**有条件的**：只在「当前最前台确实是 Chrome」时才还 ——
+       那说明是我们刚抢的。如果用户自己切到了别的应用，就不动他。
+       （若用户启动前本来就用着 Chrome，`restore_to` 会是 "Google Chrome"，
+        `restore_front_app` 会直接拒绝执行，不会替用户做决定。）
+
+    ⚠️ 前 4 秒用更短的间隔：窗口正是在这段时间创建的（实测 +1~2s 时它出现在
+       macOS 默认位置 (0,73)，屏内可见）。窗口一旦建出来就已经"闪"了一下，
+       唯一能做的是尽快把它藏掉，所以这一段要盯紧。
+    """
+    start = time.time()
+    while time.time() - start < seconds:
+        hide_browser_app(profile_dir)
+        if restore_to and frontmost_app_name() == "Google Chrome":
+            restore_front_app(restore_to)
+        time.sleep(0.25 if time.time() - start < 4.0 else 0.8)
+
+
+def frontmost_app_name() -> str | None:
+    """当前最前台的应用名（启动前记下来，之后把焦点还回去）。"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of first application '
+             'process whose frontmost is true'],
+            capture_output=True, text=True, timeout=5,
+        )
+        return proc.stdout.strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def restore_front_app(name: str | None) -> bool:
+    """把焦点还给启动浏览器**之前**的那个应用。
+
+    为什么光"隐藏"不够（实测 2026-09-21）
+    -------------------------------------
+    `hide_browser_app()` 能让窗口不再绘制，但它**不释放焦点**：
+
+        hide_browser_app() → True（osascript 成功）
+        之后连续 3 次采样，最前台仍然是 'Google Chrome'
+
+    macOS 把"隐藏"与"失去活跃状态"当两件事 —— 只有当**别的应用主动来抢**
+    时焦点才会转移（隔离测试里恰好有别的应用在抢，所以当时看起来"有效"，
+    采集场景下没有，于是焦点被占了整整 115 秒）。
+
+    所以要显式激活回去。
+
+    ⚠️ 只在**启动阶段**调用一次。若用户中途自己切了应用，再去激活旧应用
+       等于又抢了一次焦点 —— 那比不修还糟。
+    ⚠️ 不激活 "Google Chrome" 本身：那可能是**用户自己的**浏览器窗口，
+       把它拉到前台是替用户做决定。
+    """
+    if not name or name == "Google Chrome":
+        return False
+    # ⚠️ 必须走 System Events 设 frontmost，**不能**用
+    #    `tell application "X" to activate` —— System Events 报出来的名字
+    #    是**进程名**，未必是可被 `tell` 的应用名（实测 "Electron" 就不是，
+    #    `tell application "Electron"` 直接失败，于是焦点根本没还回去）。
+    script = (
+        'tell application "System Events"\n'
+        f'  set target to first application process whose name is "{name}"\n'
+        '  set frontmost of target to true\n'
+        'end tell'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=6
+        )
+        if proc.returncode != 0:
+            logger.debug("归还焦点失败：%s", proc.stderr.strip()[:90])
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def hide_browser_app_soon(
+    profile_dir: Path | str | None = None,
+    timeout: float = 5.0,
+    restore_to: str | None = None,
+) -> bool:
+    """`Popen` 之后**立刻**隐藏，并在启动阶段持续保持隐藏 + 把焦点还回去。
+
+    隐藏动作本身可能要重试：进程刚 fork 出来时，System Events 还没把它
+    登记进去，`first application process whose unix id is N` 会报找不到。
+
+    `restore_to`：启动前的最前台应用名（见 `frontmost_app_name`）。
+    """
+    profile_dir = profile_dir or BROWSER_PROFILE
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if main_browser_pid(profile_dir):
+            for _ in range(4):
+                if hide_browser_app(profile_dir):
+                    restore_front_app(restore_to)      # 显式把焦点还回去
+                    # 后台线程持续压住（不阻塞启动路径 —— 后面还要等 CDP）
+                    threading.Thread(
+                        target=_keep_hidden, args=(profile_dir, 12.0, restore_to), daemon=True
+                    ).start()
+                    return True
+                time.sleep(0.3)
+            return False
+        time.sleep(0.15)
+    return False
 
 
 def _window_id_of(ctx):
@@ -501,8 +739,8 @@ def park_context_window(ctx) -> bool:
         return False
 
 
-def park_window_of(page) -> bool:
-    """把**指定页面**所在的窗口停靠到屏幕外。
+def park_window_of(page, profile_dir: Path | str | None = None) -> bool:
+    """把**指定页面**所在的窗口停靠到屏幕外，并把应用藏起来。
 
     与 `park_context_window(ctx)` 的区别（很重要，踩过）：
     后者自己去 `ctx.pages[0]` 里挑页面，在短生命周期场景下可能挑到
@@ -511,6 +749,11 @@ def park_window_of(page) -> bool:
     整轮采集直接归零（2026-09-21）。
 
     这个版本只认调用方给的页面，语义明确，不会误伤别的标签页。
+
+    ⚠️ **停靠 ≠ 不抢焦点。** 挪窗口只让它看不见；`new_page()` 每次新建标签页
+    都会让 Chrome 重新激活为前台（实测前台应用从 Electron 变成 Google
+    Chrome）。所以这里停靠完必须再调一次 `hide_browser_app()` 把焦点还回去 ——
+    这也是"借页"路径上的第二道保险（第一道在 `launch_browser`）。
     """
     if os.environ.get("DIYPRICE_KEEP_BROWSER_HIDDEN", "1") == "0":
         return False
@@ -529,6 +772,7 @@ def park_window_of(page) -> bool:
                 },
             },
         )
+        hide_browser_app(profile_dir)      # 把焦点还给上一个应用
         return True
     except Exception as exc:  # noqa: BLE001 —— 藏窗口失败不该影响采集
         logger.warning("停靠窗口失败：%s", str(exc)[:100])
