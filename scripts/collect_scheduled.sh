@@ -38,6 +38,34 @@ if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 2000000 ]; then
   tail -500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 fi
 
+# 磁盘兜底：清理**非日志**的陈旧产物。
+#
+# 为什么需要：日志有上面的轮转，但下面这两类**没有任何清理机制**，
+# 实测在 8G 紧凑环境下会静默膨胀：
+#   · 数据库备份 data/*.bak-*        —— 已有一个 5 天前的备份占 72.76 MB
+#   · queue_results/<source>-<day>.jsonl —— 约 0.87 MB/天，一年约 317 MB
+#
+# ⚠️ 删旧的 queue_results 是**安全**的：task_id 形如 "source:product_id:day"，
+#    文件名里带日期，旧日期的文件不会再被读取。
+#    （当天那个是采集中间态 —— 崩溃后靠它捡回结果，必须留。）
+# ⚠️ 备份保留 14 天，且**至少留一个** —— 它是数据库唯一的回滚点，
+#    全删掉等于把"改坏了能退回去"这条路断掉。
+_retention_days=7
+_removed=$(find "$PROJECT_DIR/data/queue_results" -maxdepth 1 -name "*.jsonl" \
+             -mtime +$_retention_days -print -delete 2>/dev/null | wc -l | tr -d ' ')
+if [ "${_removed:-0}" -gt 0 ]; then
+  log "磁盘兜底：清理 ${_removed} 个超过 ${_retention_days} 天的 queue_results 文件"
+fi
+
+_bak_count=$(ls -1 "$PROJECT_DIR"/data/*.bak-* 2>/dev/null | wc -l | tr -d ' ')
+if [ "${_bak_count:-0}" -gt 1 ]; then
+  _old_baks=$(find "$PROJECT_DIR/data" -maxdepth 1 -name "*.bak-*" -mtime +14 \
+                -print -delete 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${_old_baks:-0}" -gt 0 ]; then
+    log "磁盘兜底：清理 ${_old_baks} 个超过 14 天的数据库备份（至少保留最新一个）"
+  fi
+fi
+
 # 单实例锁：避免手动执行与定时任务撞车（launchd 自身对同一 label 也会串行）。
 #
 # ⚠️ 锁必须能自愈，否则一次卡死会让采集**整体停摆且毫无告警**。
