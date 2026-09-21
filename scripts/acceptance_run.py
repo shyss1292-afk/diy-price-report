@@ -190,6 +190,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="端到端验收（焦点 + 内存 + 数据）")
     ap.add_argument("--sources", default="jd,pdd,xianyu")
     ap.add_argument("--limit", type=int, default=0, help="0 = 用生产默认配额")
+    ap.add_argument("--window-probe", action="store_true",
+                    help="启用窗口位置探测。⚠️ **会干扰焦点测量** —— "
+                         "它每 3s spawn 一个 Playwright 进程连 CDP，"
+                         "实测会把 Chrome 顶成前台，让焦点读数从 0 次变成 2 次。"
+                         "默认关闭；要单独验证窗口位置时再开。")
     args = ap.parse_args()
 
     SCREEN = screen_size()
@@ -228,6 +233,8 @@ def main() -> int:
             time.sleep(1.0)
 
     def watch_wins() -> None:
+        if not args.window_probe:
+            return          # 见 --window-probe 的说明：探测本身会干扰焦点测量
         while not stop.is_set():
             wins.append((time.monotonic() - t0, windows()))
             time.sleep(3.0)
@@ -264,40 +271,45 @@ def main() -> int:
         print(f"    ⚠️ 有 {len(disagreements)} 次两源读数不一致（结论以两源一致的部分为准）")
 
     # ---- 2. 窗口 ----
-    print(f"\n[2] 窗口位置（采样 {len(wins)} 次，间隔 3s）")
-    print("    判据：**窗口在屏内 且 应用可见** 才算闪现 —— 应用被隐藏时"
-          "窗口坐标仍是屏内坐标，但系统不绘制它")
-    uniq = sorted({l for _, ls in wins for l in ls})
-    worst = 0.0
-    worst_line = ""
-    for line in uniq:
-        r = visible_ratio(line)
-        print(f"      {line[:74]}   屏内 {r * 100:.3f}%")
-        if r > worst:
-            worst, worst_line = r, line
-    # 采到屏内窗口的时刻，同时看应用是否可见
-    flashed: list[str] = []
-    uncertain: list[str] = []
-    for t, ls in wins:
-        for line in ls:
-            if visible_ratio(line) > 0.005:
-                vis = app_visible()
-                if vis is True:
-                    flashed.append(f"+{t:.0f}s {line[:50]} app可见=True")
-                elif vis is None:
-                    uncertain.append(f"+{t:.0f}s {line[:50]} 可见性取不到")
-    win_ok = not flashed
-    if flashed:
-        print(f"    ❌ 出现 {len(flashed)} 次**用户可见的屏内窗口**：")
-        for f in flashed[:5]:
-            print(f"        {f}")
+    if not args.window_probe:
+        print("\n[2] 窗口位置：已跳过（--window-probe 未开）")
+        print("    原因：窗口探测每 3s 连一次 CDP，实测会把 Chrome 顶成前台，")
+        print("    污染焦点读数（同一轮从 0 次变 2 次）。窗口位置请用")
+        print("    scripts/focus_check_clean.py 单独验证。")
+        win_ok = True
     else:
-        print("    ✅ 无用户可见的屏内窗口"
-              f"（屏内坐标最大 {worst * 100:.3f}%，但应用已隐藏）")
-    if uncertain:
-        print(f"    ⚠️ {len(uncertain)} 次屏内采样**无法确认可见性**（进程正在切换）：")
-        for u in uncertain[:3]:
-            print(f"        {u}")
+        print(f"\n[2] 窗口位置（采样 {len(wins)} 次，间隔 3s）")
+        print("    判据：**窗口在屏内 且 应用可见** 才算闪现 —— 应用被隐藏时"
+              "窗口坐标仍是屏内坐标，但系统不绘制它")
+        uniq = sorted({l for _, ls in wins for l in ls})
+        worst = 0.0
+        for line in uniq:
+            r = visible_ratio(line)
+            print(f"      {line[:74]}   屏内 {r * 100:.3f}%")
+            worst = max(worst, r)
+        flashed: list[str] = []
+        uncertain: list[str] = []
+        for t, ls in wins:
+            for line in ls:
+                if visible_ratio(line) > 0.005:
+                    vis = app_visible()
+                    if vis is True:
+                        flashed.append(f"+{t:.0f}s {line[:50]} app可见=True")
+                    elif vis is None:
+                        uncertain.append(f"+{t:.0f}s {line[:50]} 可见性取不到")
+        win_ok = not flashed
+        if flashed:
+            print(f"    ❌ 出现 {len(flashed)} 次**用户可见的屏内窗口**：")
+            for f in flashed[:5]:
+                print(f"        {f}")
+        else:
+            print("    ✅ 无用户可见的屏内窗口"
+                  f"（屏内坐标最大 {worst * 100:.3f}%，但应用已隐藏）")
+        if uncertain:
+            print(f"    ⚠️ {len(uncertain)} 次屏内采样**无法确认可见性**（进程正在切换）：")
+            for u in uncertain[:3]:
+                print(f"        {u}")
+
 
     # ---- 3. 内存 ----
     print(f"\n[3] 内存")
