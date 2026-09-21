@@ -1105,6 +1105,83 @@ def test_watchdog_group_broadcast() -> None:
               _own_process_group() is False)
 
 
+def test_anti_popup_config() -> None:
+    """防弹窗夺焦：离屏坐标 + 按 PID 隐藏 + **有条件**归还焦点。
+
+    2026-09-21 实测过"窗口在屏幕外 ≠ 不抢焦点"：
+        启动前前台 = Electron
+        启动后立刻 = Google Chrome，并**一直持有到采集结束（113 秒）**
+    真正的修法是三步（见 session.py），任何一步退回都会让弹窗回来。
+    """
+    import inspect
+
+    from app.services import session
+    from app.services.session import (
+        DEFAULT_PROFILE,
+        build_launch_args,
+        find_browser,
+    )
+
+    args = build_launch_args(find_browser(), DEFAULT_PROFILE, 9222)
+    pos = next((a for a in args if a.startswith("--window-position=")), "")
+    check("离屏：启动参数带 --window-position", bool(pos), pos or "缺失")
+    if pos:
+        x, y = (int(v) for v in pos.split("=", 1)[1].split(","))
+        check("离屏：坐标远在屏幕可视区之外", x < -1000 and y > 1000, f"({x},{y})")
+    check("离屏：带 --window-size", any(a.startswith("--window-size=") for a in args))
+
+    login_args = build_launch_args(find_browser(), DEFAULT_PROFILE, 9222, park_window=False)
+    check("登录流程**不**离屏（否则用户看不到二维码）",
+          not any(a.startswith("--window-position=") for a in login_args))
+
+    hide_src = inspect.getsource(session.hide_browser_app)
+    # ⚠️ 只断言**脚本模板**本身，别断言"源码里不出现某字符串" ——
+    #    docstring 里的警告恰好会写出那个被禁止的写法，负向检查会误报。
+    check("隐藏脚本按 **unix id** 定位目标进程（按应用名会连用户自己的浏览器一起藏掉）",
+          "whose unix id is" in hide_src)
+    check("隐藏脚本不按应用名定位（`whose name is \"Google Chrome\"` 这种写法会误伤）",
+          'whose name is "Google Chrome"' not in hide_src)
+    check("归还焦点拒绝激活 Google Chrome（那可能是用户自己的窗口）",
+          'name == "Google Chrome"' in inspect.getsource(session.restore_front_app))
+    check("后台保持线程的归还焦点是**有条件**的（只在最前台确实是 Chrome 时才还）",
+          "frontmost_app_name()" in inspect.getsource(session._keep_hidden))
+    check("启动前记录最前台应用（归还焦点的前提）",
+          "frontmost_app_name" in inspect.getsource(session.hide_browser_app_soon))
+
+
+def test_request_slimming_rules() -> None:
+    """资源拦截：**图片必须放行** —— 它是滑块验证码的载体。
+
+    实测（2026-09-21，闲鱼同一次搜索「RTX 5070 12G」，含基线复测）：
+
+        现状            33 张商品卡    峰值 ~1009 MB
+        --headless=new   3 张（-91%）  且页面命中「非法访问」
+        拦图片           3 张（-91%）  内存只省约 10%（在噪声范围内）
+        关 site isolation 33 张        内存反而 +6%
+        限 V8 堆 256MB   33 张        内存 -1%（噪声内）
+
+    结论：拦图片/开 headless 都会把数据打到 1/10，**代价与收益严重不成比例**。
+    这条断言守住这两条红线。
+    """
+    from app.services.browser_worker import should_block
+
+    for name in ("a.png", "b.jpg", "c.jpeg", "d.webp", "e.gif", "f.svg"):
+        check(f"图片必须放行：{name}", should_block(f"https://cdn.example.com/{name}", "image") is False)
+
+    check("拦媒体（media）", should_block("https://cdn.example.com/v.mp4", "media") is True)
+    check("拦字体（font）", should_block("https://cdn.example.com/f.woff2", "font") is True)
+    check("字体扩展名兜底（resource_type 被归成 other 时）",
+          should_block("https://cdn.example.com/f.woff2", "other") is True)
+
+    for name in ("punish.js", "rgv587.js", "risk.js", "anti.js", "um.js", "geetest.js"):
+        check(f"平台安全 SDK / 验证码必须放行：{name}",
+              should_block(f"https://cdn.example.com/{name}", "script") is False)
+
+    for rt in ("document", "script", "xhr", "fetch", "stylesheet"):
+        check(f"取数必需的资源类型不碰：{rt}",
+              should_block("https://cdn.example.com/anything", rt) is False)
+
+
 # ====================================================================== 主流程
 
 def main() -> int:
@@ -1125,6 +1202,8 @@ def main() -> int:
         test_stale_log_threshold,
         test_wall_clock_limit,
         test_watchdog_group_broadcast,
+        test_anti_popup_config,
+        test_request_slimming_rules,
         test_alias_variants,
         test_capacity_disambiguation,
         test_clean_noise_filters,

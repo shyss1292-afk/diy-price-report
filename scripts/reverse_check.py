@@ -40,6 +40,8 @@ PROBE = PROJ / "app/services/probe.py"
 SEED = PROJ / "app/seed_data.py"
 CLEAN = PROJ / "app/services/clean.py"
 NORMALIZE = PROJ / "app/services/normalize.py"
+SESSION = PROJ / "app/services/session.py"
+WORKER = PROJ / "app/services/browser_worker.py"
 SCHED = PROJ / "scripts/collect_scheduled.sh"
 
 # (说明, 文件, 原文锚点, 改坏成)
@@ -190,6 +192,24 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         'kill -TERM -- "-$pgid" 2>/dev/null',
         'kill -TERM "$COLLECT_PID" 2>/dev/null',
     ),
+    (
+        "窗口离屏坐标被挪回屏幕内（弹窗立刻回来）",
+        SESSION,
+        "OFFSCREEN_X = -3000\nOFFSCREEN_Y = 5000",
+        "OFFSCREEN_X = 100\nOFFSCREEN_Y = 100",
+    ),
+    (
+        "隐藏改为按应用名定位（会连用户自己的浏览器一起藏掉）",
+        SESSION,
+        "whose unix id is {int(pid)}",
+        'whose name is "Google Chrome"',
+    ),
+    (
+        "图片被加进拦截（滑块验证码的载体被拦掉）",
+        WORKER,
+        '    if resource_type == "image":\n        return False',
+        '    if resource_type == "image":\n        return True',
+    ),
 ]
 
 
@@ -217,7 +237,8 @@ def main() -> int:
             shutil.copy2(bak, path)
 
     try:
-        for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED}:
+        for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED,
+                 SESSION, WORKER}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak
