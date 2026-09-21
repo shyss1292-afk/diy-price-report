@@ -116,6 +116,12 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "_STALE_RUNNING_MINUTES = 5",
     ),
     (
+        "墙钟兜底上限被调成超过锁陈旧阈值（会重复采集）",
+        PIPELINE,
+        "_DEFAULT_WALL_CLOCK_LIMIT = 2100.0",
+        "_DEFAULT_WALL_CLOCK_LIMIT = 3000.0",
+    ),
+    (
         "别名粘连变体失效（'5500XT' 这类写法整类漏匹配）",
         SEED,
         '    forms |= {_GLUE_SUFFIX.sub(r"\\1\\2", f) for f in list(forms)}',

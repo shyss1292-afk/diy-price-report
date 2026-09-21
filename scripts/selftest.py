@@ -960,6 +960,29 @@ def test_clean_noise_filters() -> None:
         check(f"不误杀：{note}", keep, why)
 
 
+def test_wall_clock_limit() -> None:
+    """采集的硬性墙钟上限（防"卡死无限挂着"）。
+
+    2026-09-21 实测：17:00 那轮卡在 Playwright/CDP 等待里 **3 小时 27 分**，
+    而 shell 看门狗没杀掉它 —— 那轮一直占着单实例锁，18/19/20 点三轮全废。
+    所以加了这一层（独立线程 `os._exit`，不经过信号机制）。这条断言守住
+    "上限必须大于正常一轮、又小于单实例锁的陈旧阈值"这个区间。
+    """
+    from app.services.pipeline import _DEFAULT_WALL_CLOCK_LIMIT, wall_clock_limit
+
+    normal_round = 600          # 正常一轮约 9~10 分钟
+    lock_stale = 2400           # collect_scheduled.sh 的 LOCK_STALE_SECONDS
+    check("默认上限 > 正常一轮耗时的 2 倍", _DEFAULT_WALL_CLOCK_LIMIT > normal_round * 2,
+          f"{_DEFAULT_WALL_CLOCK_LIMIT:.0f}s")
+    check("默认上限 < 单实例锁的陈旧阈值（否则锁会被判陈旧而重复采集）",
+          _DEFAULT_WALL_CLOCK_LIMIT < lock_stale, f"{_DEFAULT_WALL_CLOCK_LIMIT:.0f}s")
+    check("未设环境变量时用默认值", wall_clock_limit() == _DEFAULT_WALL_CLOCK_LIMIT)
+    with mock.patch.dict(os.environ, {"DIYPRICE_COLLECT_MAX_SECONDS": "300"}):
+        check("DIYPRICE_COLLECT_MAX_SECONDS 可覆盖", wall_clock_limit() == 300.0)
+    with mock.patch.dict(os.environ, {"DIYPRICE_COLLECT_MAX_SECONDS": "0"}):
+        check("设 0 表示关闭兜底", wall_clock_limit() == 0.0)
+
+
 # ====================================================================== 主流程
 
 def main() -> int:
@@ -978,6 +1001,7 @@ def main() -> int:
         test_probe_gates,
         test_db_pragmas,
         test_stale_log_threshold,
+        test_wall_clock_limit,
         test_alias_variants,
         test_clean_noise_filters,
         test_zero_yield_reason,

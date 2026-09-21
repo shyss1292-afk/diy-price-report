@@ -22,6 +22,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
+import threading
 import time as _time
 from datetime import date, datetime, time, timedelta
 
@@ -45,6 +48,64 @@ def _day_list(day: date, backfill_days: int) -> list[date]:
         start = day - timedelta(days=backfill_days - 1)
         return [start + timedelta(days=i) for i in range(backfill_days)]
     return [day]
+
+
+# 采集的**硬性墙钟上限**（秒）。正常一轮 9~10 分钟（15 个闲鱼型号约 8 分钟），
+# 35 分钟足够宽裕，同时低于单实例锁的陈旧阈值（40 分钟）。
+_DEFAULT_WALL_CLOCK_LIMIT = 2100.0
+
+
+def wall_clock_limit() -> float:
+    """墙钟上限，`DIYPRICE_COLLECT_MAX_SECONDS` 可覆盖（设 0 关闭）。"""
+    try:
+        return max(0.0, float(os.getenv("DIYPRICE_COLLECT_MAX_SECONDS", "")
+                              or _DEFAULT_WALL_CLOCK_LIMIT))
+    except ValueError:
+        return _DEFAULT_WALL_CLOCK_LIMIT
+
+
+def _install_wall_clock_guard(limit: float) -> None:
+    """硬性墙钟兜底：到点**强制结束进程**。
+
+    为什么需要它（2026-09-21 实测）
+    -------------------------------
+    17:00 那轮卡在 Playwright/CDP 等待里 **3 小时 27 分**，而 shell 层的
+    看门狗（`collect_scheduled.sh` 的 `kill -TERM` → 15s → `kill -KILL`）
+    **没有杀掉它** —— 原因尚未定位，看门狗子 shell 执行完就退出了，
+    子进程却还活着。那轮一直占着单实例锁，导致 18:00/19:00/20:00 三轮全废。
+
+    这一层与 shell 看门狗是**双保险，不是替代**：
+      · shell 看门狗负责收尾 shell 层（写汇总、释放锁）
+      · 这一层保证**进程绝不会无限挂着** —— 用独立线程调 `os._exit()`，
+        **不经过信号机制**，所以即使主线程卡在不可中断的系统调用里、
+        或进程对 SIGTERM 无响应（实测这两个卡死进程都无响应），也照样终止。
+
+    卡死时顺手 SIGKILL 掉浏览器进程：否则它们会变成孤儿一直吃内存
+    （下一次启动的 `_purge_stale` 虽然也会清，但那是下一轮的事了）。
+    """
+    if limit <= 0:
+        return
+
+    def _guard() -> None:
+        _time.sleep(limit)
+        human = (f"{limit / 60:.0f} 分钟" if limit >= 60 else f"{limit:.0f} 秒")
+        logger.error("=" * 68)
+        logger.error("采集已超过 %s 仍未结束（疑似卡在 CDP / 网络等待），强制终止进程", human)
+        logger.error("未完成的任务留在队列里，下一轮会优先重做")
+        logger.error("=" * 68)
+        try:
+            from .session import BROWSER_PROFILE, profile_pids
+
+            for pid in profile_pids(BROWSER_PROFILE):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        except Exception:  # noqa: BLE001 —— 清理失败不影响强制退出
+            pass
+        os._exit(3)      # 硬退出：不走 atexit、不等线程
+
+    threading.Thread(target=_guard, daemon=True, name="wall-clock-guard").start()
 
 
 def _platforms_for(collector, platforms: list[Platform]) -> list[Platform]:
@@ -213,6 +274,8 @@ def run_pipeline(
     from .browser_worker import get_worker, install_shutdown_handlers
 
     install_shutdown_handlers()
+    # 墙钟兜底（与 shell 看门狗双保险）—— 见 _install_wall_clock_guard
+    _install_wall_clock_guard(wall_clock_limit())
     worker = get_worker()
 
     # 熔断状态可见性：把上一轮留下的冷却记录在轮次开头打出来 ——
