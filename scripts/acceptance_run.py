@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -36,7 +37,8 @@ PARKED_LEFT = -1000        # 停靠时 left 应远小于 0
 SCREEN = (1680, 1050)      # 由 screen_size() 覆盖
 
 
-def frontmost() -> str:
+def _osascript_front() -> str:
+    """System Events 的 frontmost（254ms/次，慢但语义直观）。"""
     try:
         out = subprocess.run(
             ["osascript", "-e",
@@ -47,6 +49,43 @@ def frontmost() -> str:
         return out.stdout.strip()
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _lsappinfo_map() -> dict[str, str]:
+    """ASN → 应用名（`lsappinfo front` 只要 6ms，但不返回名字）。"""
+    out = subprocess.run(["lsappinfo", "list"], capture_output=True, text=True).stdout
+    return {asn: name for name, asn in re.findall(r'"([^"]+)"\s+ASN:([0-9a-fx\-:]+)', out)}
+
+
+_ASN_MAP: dict[str, str] = {}
+
+
+def _lsappinfo_front() -> str:
+    """WindowServer 层面的权威前台应用（6ms/次）。"""
+    global _ASN_MAP
+    if not _ASN_MAP:
+        _ASN_MAP = _lsappinfo_map()
+    out = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True).stdout
+    key = out.strip().replace("ASN:", "")
+    if key not in _ASN_MAP:
+        _ASN_MAP = _lsappinfo_map()
+    return _ASN_MAP.get(key, "")
+
+
+def frontmost() -> tuple[str, bool]:
+    """**双源**取前台应用，返回 (名字, 两源是否一致)。
+
+    为什么必须双源：单用 osascript 出现过"报告 Chrome 抢焦、但 lsappinfo
+    （WindowServer 权威）说没有"的矛盾读数。两个独立来源一致才算数 ——
+    抢焦这种结论不该建立在单一工具的偏差上。
+    """
+    a = _osascript_front()
+    b = _lsappinfo_front()
+    if not a or not b:
+        return (a or b), False
+    # 同一个应用在两套命名下可能不同（"Electron" vs "WorkBuddy AI"），
+    # 所以只比较"是不是 Chrome"这个我们关心的判据
+    return a, (a == "Google Chrome") == (b == "Google Chrome")
 
 
 def screen_size() -> tuple[int, int]:
@@ -174,6 +213,7 @@ def main() -> int:
     )
 
     apps: list[tuple[float, str]] = []
+    disagreements: list[tuple[float, str]] = []
     wins: list[tuple[float, list[str]]] = []
     mems: list[tuple[float, float, int]] = []
     stop = threading.Event()
@@ -181,7 +221,10 @@ def main() -> int:
 
     def watch_apps() -> None:
         while not stop.is_set():
-            apps.append((time.monotonic() - t0, frontmost()))
+            name, agree = frontmost()
+            apps.append((time.monotonic() - t0, name))
+            if not agree:
+                disagreements.append((time.monotonic() - t0, name))
             time.sleep(1.0)
 
     def watch_wins() -> None:
@@ -217,6 +260,8 @@ def main() -> int:
         print(f"      +{t:>5.0f}s  {name!r}{mark}")
     focus_ok = chrome_hits == 0
     print(f"    Chrome 成为前台：{chrome_hits} 次 → {'✅ 未抢焦点' if focus_ok else '❌ 抢了焦点'}")
+    if disagreements:
+        print(f"    ⚠️ 有 {len(disagreements)} 次两源读数不一致（结论以两源一致的部分为准）")
 
     # ---- 2. 窗口 ----
     print(f"\n[2] 窗口位置（采样 {len(wins)} 次，间隔 3s）")

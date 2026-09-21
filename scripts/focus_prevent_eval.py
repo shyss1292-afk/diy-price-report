@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,6 +33,7 @@ from app.services.session import (  # noqa: E402
     close_browser,
     find_browser,
     hide_browser_app,
+    launch_browser,
     main_browser_pid,
     restore_front_app,
 )
@@ -140,6 +142,89 @@ VARIANTS = [
 ]
 
 
+def asn_map() -> dict[str, str]:
+    """ASN → 应用名。从 `lsappinfo list` 解析。
+
+    为什么要这个：`lsappinfo front` 只要 **6ms**（osascript 要 254ms，慢 42 倍），
+    但它只返回 ASN 不返回名字；而 `lsappinfo info <asn>` 在沙箱里查不到。
+    所以自己建映射表 —— 这样采样间隔能压到约 10ms，
+    足以测出"抢焦窗口"的真实毫秒数。
+
+    ⚠️ 用正则整表提取，不要逐行状态机 —— 逐行写法实测漏了 3 条，
+       连前台应用本身都查不到（返回 `<0x0-e00e:>` 占位符）。
+       格式：` 3) "XAppTool" ASN:0x0-8008:`
+    """
+    out = subprocess.run(["lsappinfo", "list"], capture_output=True, text=True).stdout
+    return {
+        asn: name
+        for name, asn in re.findall(r'"([^"]+)"\s+ASN:([0-9a-fx\-:]+)', out)
+    }
+
+
+class FastFrontmost:
+    """高频采样最前台应用名（约 10ms 一次）。
+
+    先用 osascript 拿不到这个分辨率（254ms/次），实测会把 1.5 秒的窗口
+    采成 7 个点，误差极大。这里改用 `lsappinfo front` + 自建 ASN 映射。
+    """
+
+    def __init__(self) -> None:
+        self._map = asn_map()
+        self._last_refresh = time.monotonic()
+
+    def refresh(self) -> None:
+        self._map = asn_map()
+        self._last_refresh = time.monotonic()
+
+    def current(self) -> str:
+        if time.monotonic() - self._last_refresh > 3.0:
+            self.refresh()
+        out = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True).stdout
+        asn = out.strip().replace("ASN:", "")
+        if asn not in self._map:
+            self.refresh()
+        return self._map.get(asn, f"<{asn or '未知'}>")
+
+
+def measure_focus_window(rounds: int = 3) -> None:
+    """精确测量"抢焦窗口"的毫秒数。"""
+    print("=" * 84)
+    print(f"精确测量抢焦窗口（{rounds} 次启动，~10ms 采样）")
+    print("=" * 84)
+
+    for i in range(1, rounds + 1):
+        close_browser()
+        time.sleep(2)
+        ff = FastFrontmost()
+        prev = ff.current()
+        t0 = time.monotonic()
+        launch_browser()
+
+        samples: list[tuple[float, str]] = []
+        while time.monotonic() - t0 < 16:
+            samples.append(((time.monotonic() - t0) * 1000, ff.current()))
+
+        chrome = [(t, n) for t, n in samples if n == "Google Chrome"]
+        print(f"\n  第 {i} 次（启动前前台 {prev!r}）")
+        if not chrome:
+            print("    ✅ Chrome 从未成为前台（0 ms）")
+            continue
+        start, end = chrome[0][0], chrome[-1][0]
+        # 用相邻采样点估上下界
+        gap = (samples[1][0] - samples[0][0]) if len(samples) > 1 else 10.0
+        print(f"    抢焦窗口：{end - start:.0f} ms（采样 {len(samples)} 次，"
+              f"间隔约 {gap:.0f} ms）")
+        print(f"    起止：+{start:.0f} ms → +{end:.0f} ms")
+        transitions = []
+        for t, n in samples:
+            if not transitions or transitions[-1][1] != n:
+                transitions.append((t, n))
+        for t, n in transitions[:6]:
+            print(f"      +{t:>7.0f} ms  {n}")
+
+    close_browser()
+
+
 def main() -> int:
     print("=" * 84)
     print("抢焦**阻断**方案对照（判据：启动后 15s 内最前台出现 Chrome 的次数，0 = 真正阻断）")
@@ -226,4 +311,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    _ap = argparse.ArgumentParser(description="抢焦阻断方案对照 / 抢焦窗口精确测量")
+    _ap.add_argument("--measure-window", action="store_true",
+                     help="只做抢焦窗口的毫秒级精确测量")
+    _ap.add_argument("--rounds", type=int, default=3, help="测量轮数")
+    _a = _ap.parse_args()
+    if _a.measure_window:
+        measure_focus_window(_a.rounds)
+        sys.exit(0)
     sys.exit(main())
