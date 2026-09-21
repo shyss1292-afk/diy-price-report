@@ -44,6 +44,30 @@ OFF_TOPIC_KEYWORDS: tuple[str, ...] = (
 MIN_RATIO = 0.40
 MAX_RATIO = 2.60
 
+# 求购 / 收购帖 —— 闲鱼上大量"1500 收一张 3070"这类帖子，价格是**求购价**
+# 不是成交价，混进价格区间会把趋势带偏。
+#
+# ⚠️ 这几条模式是**逐个在 10069 条存量真实明细上量过误杀率**之后才留下的，
+#    不是拍脑袋写的。被否掉的两条（都实测误杀严重，绝不能加）：
+#
+#      · "收购" —— 命中 5 条，**全部**是卖家声明「绝不收购被封机码硬件」，
+#        是**否定语境**，加进去等于误杀正常在售的卡。
+#      · 编号式罗列 `1. 2. 3.` —— 命中 395 条（3.9%），全是把规格当编号
+#        （"PCIe 5.0" / "蓝牙5.4" / "2.5K MiniLED"），误杀率远超收益。
+#
+# 所以判据只用**明确的求购语义**，并显式排除已知的反例：
+#   · `(?<!回)` 排除"个人一手**回**收一张"（卖家在售，不是求购）
+#   · `(?!货|款|入|藏…)` 排除"编号3088**收货**请拍开箱视频"
+_WANTED_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"求购"),
+    re.compile(r"(?<!回)收一[张块个台]"),                 # "自用收一张" / "收一个"
+    re.compile(r"\d{2,}\s*[元块]?\s*收(?![货款入藏购件到益费])"),   # "1500收" / "620 收"
+)
+
+# 多件打包 —— 价格是**整包价**或单件批发价，不是一张卡的市场价。
+# 实测 19 条存量命中，均为"一起24个打包出售"/"每片899打包出，一共有4片"这类。
+_LOT_KEYWORDS: tuple[str, ...] = ("打包出", "打包出售", "打包卖")
+
 _SEPARATORS = re.compile(r"[/／|｜、]")
 _MULTI_MODEL_THRESHOLD = 3
 
@@ -72,6 +96,14 @@ def check(price: float, base_price: float | None, title: str = "") -> tuple[bool
     for keyword in OFF_TOPIC_KEYWORDS:
         if keyword in text:
             return False, f"非电脑配件（命中「{keyword}」）"
+
+    for pattern in _WANTED_PATTERNS:
+        if pattern.search(text):
+            return False, f"求购帖（命中「{pattern.pattern}」）"
+
+    for keyword in _LOT_KEYWORDS:
+        if keyword in text:
+            return False, f"多件打包（命中「{keyword}」）"
 
     if _looks_like_multi_model(text):
         return False, "多型号合并商品"

@@ -37,6 +37,8 @@ PIPELINE = PROJ / "app/services/pipeline.py"
 BASE = PROJ / "app/collectors/base.py"
 DB = PROJ / "app/db.py"
 PROBE = PROJ / "app/services/probe.py"
+SEED = PROJ / "app/seed_data.py"
+CLEAN = PROJ / "app/services/clean.py"
 
 # (说明, 文件, 原文锚点, 改坏成)
 BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
@@ -113,6 +115,51 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "_STALE_RUNNING_MINUTES = 45",
         "_STALE_RUNNING_MINUTES = 5",
     ),
+    (
+        "别名粘连变体失效（'5500XT' 这类写法整类漏匹配）",
+        SEED,
+        '    forms |= {_GLUE_SUFFIX.sub(r"\\1\\2", f) for f in list(forms)}',
+        "    forms |= set()",
+    ),
+    (
+        "品牌粘连变体失效（'RTX4060 Ti' 被判成 'RTX4060 8G'）",
+        SEED,
+        "    forms |= {_GLUE_BRAND.sub(lambda m: m.group(1), f) for f in list(forms)}",
+        "    forms |= set()",
+    ),
+    (
+        "去品牌与去容量叠加 → 产出裸数字别名（跨容量抢单）",
+        SEED,
+        "    stripped = _CAPACITY_SUFFIX.sub(\"\", model)\n"
+        "    if stripped != model:\n"
+        "        forms.add(stripped)\n",
+        "    stripped = _CAPACITY_SUFFIX.sub(\"\", model)\n"
+        "    if stripped != model:\n"
+        "        forms.add(stripped)\n"
+        "        for _p in _BRAND_PREFIXES:\n"
+        "            if stripped.upper().startswith(_p):\n"
+        "                forms.add(stripped[len(_p):])\n",
+    ),
+    (
+        "求购帖过滤失效（求购价会当成成交价入库）",
+        CLEAN,
+        "    for pattern in _WANTED_PATTERNS:",
+        "    for pattern in ():",
+    ),
+    (
+        "求购规则写宽（'绝不收购' 这类否定语境被误杀）",
+        CLEAN,
+        '    re.compile(r"求购"),',
+        '    re.compile(r"求购"),\n    re.compile(r"收购"),',
+    ),
+    (
+        "编号式罗列回归（把规格列表当打包商品误杀）",
+        CLEAN,
+        "    return len(_SEPARATORS.findall(title)) >= _MULTI_MODEL_THRESHOLD",
+        "    if len(_SEPARATORS.findall(title)) >= _MULTI_MODEL_THRESHOLD:\n"
+        "        return True\n"
+        '    return len(re.findall(r"(?:^|\\s)[1-9][.、)）]\\s*\\S", title)) >= 3',
+    ),
 ]
 
 
@@ -140,7 +187,7 @@ def main() -> int:
             shutil.copy2(bak, path)
 
     try:
-        for path in {BREAKER, PIPELINE, BASE, DB, PROBE}:
+        for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak

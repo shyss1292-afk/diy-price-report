@@ -840,6 +840,126 @@ def test_stale_log_threshold() -> None:
           _STALE_RUNNING_MINUTES >= 30, f"{_STALE_RUNNING_MINUTES} 分钟")
 
 
+def test_alias_variants() -> None:
+    """别名变体的**召回**与**不越界** —— 用户明确要求"防过拟合"。
+
+    放宽别名提高召回，但每一条都仍受字母数字边界校验约束，
+    所以"同一型号的写法差异"能命中，"相邻型号"绝不能互相命中。
+    这组断言就是这条边界的守卫。
+    """
+    from types import SimpleNamespace
+
+    from app.seed_data import build_aliases, product_rows
+    from app.services.normalize import ModelMatcher
+
+    rows = {r["model"]: r for r in product_rows()}
+
+    def matcher_for(*models: str):
+        prods = [
+            SimpleNamespace(
+                id=i, model=m, category=rows[m]["category"], aliases=build_aliases(m)
+            )
+            for i, m in enumerate(models)
+        ]
+        return ModelMatcher(prods), {i: m for i, m in enumerate(models)}
+
+    # ---- 召回：同一型号的不同写法都要命中 ----
+    recall = [
+        ("RTX 3080 12G", "影驰3080 12g星耀 锁算力 22年1月出厂"),   # 去品牌前缀
+        ("RTX 3080 12G", "耕升3080 12GB 追风版 功能一切正常"),      # GB 写法
+        ("RX 5500 XT 4G", "撼讯 5500XT 4G显卡 实拍，成色如图"),      # 粘连
+        ("RX 5500 XT 4G", "蓝宝石RX 5500 XT 4G 显卡 双风扇"),        # 标准写法
+        ("RTX 3060 Ti 8G", "七彩虹3060TI 8G 白ULTRA 原盒原码"),      # 粘连 + 全大写
+        ("RTX 4090 D 24G", "RTX 4090D 24G 显卡 全新未拆封"),         # D 后缀粘连
+    ]
+    for model, title in recall:
+        m, ids = matcher_for(model)
+        hit = m.match(title, category=None)
+        check(f"召回：{title[:26]}… → {model}",
+              hit is not None and ids[hit] == model, f"实际 {ids.get(hit)}")
+
+    # ---- 不越界：相邻型号 / 容量版本绝不能互相命中 ----
+    guard = [
+        ("影驰RTX 3070 Ti 8G显卡 三风扇", "RTX 3070 Ti 8G", "RTX 3070 8G"),
+        ("影驰RTX 3070 8G显卡 三风扇", "RTX 3070 8G", "RTX 3070 Ti 8G"),
+        ("华硕RTX 3080 10G显卡 三风扇", "RTX 3080 10G", "RTX 3080 12G"),
+        ("华硕RTX 3080 12G显卡 三风扇", "RTX 3080 12G", "RTX 3080 10G"),
+        ("七彩虹3060ti 8G 原盒原码", "RTX 3060 Ti 8G", "RTX 3060 8G"),
+        ("七彩虹3060 8G 拆机件", "RTX 3060 8G", "RTX 3060 Ti 8G"),
+    ]
+    for title, want, avoid in guard:
+        m, ids = matcher_for(want, avoid)
+        got = ids.get(m.match(title, category=None))
+        check(f"不越界：{title[:22]}… → {want}（不得落到 {avoid}）", got == want, f"实际 {got}")
+
+    # ---- 禁止裸数字别名 ----
+    # "去品牌"与"去容量"叠加会产出裸数字，它无法区分容量版本 ——
+    # 实测把"华硕猛禽3080 vga联名 12G显卡"抢到 3080 10G。
+    for model, banned in (
+        ("RTX 3060 12G", "3060"),
+        ("RTX 3080 12G", "3080"),
+        ("RX 5500 XT 4G", "5500XT"),
+        ("RX 5700 8G", "5700"),
+    ):
+        aliases = {a.strip() for a in build_aliases(model).split(",")}
+        check(f"禁止裸数字别名：{model} 的别名不得含 {banned!r}", banned not in aliases)
+
+    # ---- 品牌与数字粘连：修的是一个真 bug ----
+    # 标题常写 "微星RTX4060 Ti魔龙"（品牌与数字粘连、后缀带空格），
+    # 而 normalize_text 不会拆开粘连 —— 以数字开头的别名（"4060 Ti"）会因
+    # **左边界校验失败**（前面是 "X"，属于 [0-9A-Z]）全部落空，
+    # 只剩过宽的 "RTX4060" 命中，于是 4060 Ti 被判成 4060 8G。
+    m, ids = matcher_for("RTX 4060 Ti 8G", "RTX 4060 Ti 16G", "RTX 4060 8G")
+    got = ids.get(m.match("微星RTX4060 Ti魔龙X Trio 8G显卡", category=None))
+    check("品牌粘连：RTX4060 Ti 不得被判成 RTX 4060 8G",
+          got in ("RTX 4060 Ti 8G", "RTX 4060 Ti 16G"), f"实际 {got}")
+
+    m, ids = matcher_for("RTX 5070 Ti 16G", "RTX 5070 12G")
+    got = ids.get(m.match("技嘉RTX5070 Ti 魔鹰 16G 国行 双BIOS", category=None))
+    check("品牌粘连：技嘉RTX5070 Ti 魔鹰 16G → RTX 5070 Ti 16G（不得落到 5070 12G）",
+          got == "RTX 5070 Ti 16G", f"实际 {got}")
+
+    # ---- 规模可控（别名爆炸会拖慢匹配）----
+    counts = [len(build_aliases(r["model"]).split(",")) for r in product_rows()]
+    check("每型号别名数 ≤ 40", max(counts) <= 40, f"最多 {max(counts)}")
+    check("全库别名总数 ≤ 6000", sum(counts) <= 6000, f"共 {sum(counts)}")
+
+
+def test_clean_noise_filters() -> None:
+    """求购 / 多件打包的过滤：**既要拦住噪音，也不能误杀卖家帖**。
+
+    这几条"不得误杀"的用例全部来自实测踩过的坑 —— 初版规则把它们全判成
+    求购帖，会在采集时**删掉真实在售数据**。规则是在 10069 条存量明细上
+    逐条量过误杀率才收敛成现在这样的。
+    """
+    # ⚠️ 必须起别名 —— `from ... import check` 会**遮蔽本模块的 check 助手**，
+    #    于是第二个参数（布尔）会被当成 base_price 传进去，报 TypeError。
+    from app.services.clean import check as clean_check
+
+    blocked = [
+        ("3070显卡，1500收，3070ti也行，一张就行，自用。", "求购"),
+        ("620 收一个i5-12400F处理器，自用装机。要求12代酷睿正式版散片", "求购"),
+        ("铭瑄 intel Arc B580 Photon 12G显卡 双风扇 自用收一张b580，颜色不限", "求购"),
+        ("收英特尔270k plus，盒装自用组副机 1700收一个Intel Core Ultra 7", "求购"),
+        ("三个a卡打包出，功能都好的，成色如图，打包包邮价", "打包"),
+        ("一起24个打包出售拆机件，成色还可以", "打包"),
+    ]
+    for title, kind in blocked:
+        keep, why = clean_check(1200.0, 1200.0, title)
+        check(f"拦噪音：{title[:26]}… → {kind}", (not keep) and kind in why, why)
+
+    allowed = [
+        ("AMD Ryzen 5 7500F（二手）CPU 1、本店商品，绝不收购被封机码硬件", "「绝不收购」是否定语境"),
+        ("蓝宝石 rx7900xt 20g超白金显卡 个人一手回收一张 有需要的老板拍", "「回收一张」是卖家在售"),
+        ("i5 13400f CPU 编号3088收货请拍完整开箱视频，否则外观问题无法处理", "「收货」不是求购"),
+        ("联力 O11 Dynamic EVO 机箱 1.全新未拆封 2.支持水冷 3.正品保证", "编号罗列的是规格"),
+        ("影驰3060 金属大师12G，三风扇，金属背板，无拆无修", "正常在售"),
+    ]
+    for title, note in allowed:
+        keep, why = clean_check(1200.0, 1200.0, title)
+        check(f"不误杀：{note}", keep, why)
+
+
 # ====================================================================== 主流程
 
 def main() -> int:
@@ -858,6 +978,8 @@ def main() -> int:
         test_probe_gates,
         test_db_pragmas,
         test_stale_log_threshold,
+        test_alias_variants,
+        test_clean_noise_filters,
         test_zero_yield_reason,
     )
     for fn in tests:

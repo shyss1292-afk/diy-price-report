@@ -196,15 +196,93 @@ _EXTRA_ALIASES: dict[str, list[str]] = {
 # 平台标题常写成 "O16G" / "16GB" / 干脆不写容量，短名能显著提高命中率。
 _CAPACITY_SUFFIX = re.compile(r"\s+\d+\s*[GT]B?$", re.IGNORECASE)
 
+# 品牌前缀：真实标题常**不写**品牌，只写 "3080 12G"、"5700 8G"、"2080 8G"。
+# 长前缀必须排在前面，否则 "GEFORCE RTX 5090" 只会被 "RTX " 截一刀。
+_BRAND_PREFIXES: tuple[str, ...] = (
+    "GEFORCE RTX ", "GEFORCE GTX ", "RTX ", "RX ", "GTX ", "ARC ",
+)
 
-def build_aliases(model: str) -> str:
-    """为型号生成别名串（逗号分隔），供跨平台标题匹配使用。"""
-    base = {model, model.replace(" ", ""), model.replace(" ", "").lower()}
+# "数字 + 空格 + 短字母后缀" → 允许粘连（"5500 XT" → "5500XT"、"5070 Ti" → "5070Ti"）。
+#
+# ⚠️ 这不是锦上添花，而是**必须**：`normalize_text` 会把分隔符折叠成空格，
+# 却不会把粘连的字母拆开 —— 所以 "5500XT" 与 "5500 XT" 在匹配器眼里是
+# **两个完全不同的 token**。只给带空格的形式，写成 "5500XT 4G" 的标题
+# 会整类漏匹配（实测闲鱼未匹配样本里这一类占大头）。
+_GLUE_SUFFIX = re.compile(r"(\d)\s+([A-Za-z]{1,4})(?=\s|$)")
 
+# 容量写法：8G ↔ 8GB。闲鱼标题两种都常见，而边界校验会让 "8G" 匹配不上 "8GB"。
+_TO_GB = re.compile(r"(\d)\s*G(?![A-Za-z])")
+_TO_G = re.compile(r"(\d)\s*GB(?![A-Za-z])")
+
+
+# 品牌与型号数字粘连："RTX 4060 Ti" → "RTX4060 Ti"。
+#
+# ⚠️ 这条是修一个**真 bug**，不是锦上添花：
+#    标题常写成 "微星RTX4060 Ti魔龙"（品牌与数字粘、后缀不粘），
+#    而 normalize_text 不会把粘连的拆开 —— 于是所有以数字开头的别名
+#    （"4060 Ti"）都会**左边界校验失败**（前面是 "X"，属于 [0-9A-Z]），
+#    只剩过宽的 "RTX4060" 命中，结果 4060 Ti 被判成 4060 8G。
+#    实测："技嘉RTX5070 Ti 魔鹰 16G" 被判成 RTX 5070 12G。
+#
+#    只粘**品牌那一段**（不粘后缀、不做全组合），避免别名组合爆炸。
+_GLUE_BRAND = re.compile(r"^(GEFORCE RTX|GEFORCE GTX|RTX|RX|GTX|ARC)\s+", re.IGNORECASE)
+
+
+def _alias_variants(model: str) -> set[str]:
+    """机械派生的别名变体（不含 `_EXTRA_ALIASES` 里的人工别名）。
+
+    这里刻意做成**通用规则**而不是逐型号手写：型号库会持续扩充
+    （2026-09 一次加了 42 个显卡），手写别名必然跟不上，而
+    "新加型号忘了写别名" 的表现是"页面搜不到"，很难归因。
+
+    ⚠️ **"去品牌"与"去容量"绝对不能叠加。**
+    两者相乘会产出**裸数字别名**（`RTX 3060 12G` → `3060`），而裸数字
+    无法区分容量版本 —— 实测它会把
+      · "华硕猛禽3080 vga联名 **12G**显卡" 抢到 **RTX 3080 10G**
+      · "梅捷焱龙5500xt显卡…**8G**显存" 抢到 **RX 5500 XT 4G**
+    即用户明确禁止的"把 3070 误匹配进 3070 Ti"那一类。
+    代价是"型号与容量在标题里分离"的样本匹配不上 —— 那是**诚实的漏匹配**，
+    比往库里写错容量好得多。
+    """
+    forms: set[str] = {model}
+
+    # ① 去品牌前缀（**容量必须保留**）：真实标题常只写 "3080 12G"、"5700 8G"
+    for prefix in _BRAND_PREFIXES:
+        if model.upper().startswith(prefix):
+            forms.add(model[len(prefix):])
+
+    # ② 去容量后缀（**品牌必须保留**）："RTX 5060 Ti 16G" → "RTX 5060 Ti"。
+    #    这是原有行为，用于标题干脆不写容量的场景；保留品牌前缀才能让
+    #    "更具体的长别名优先"这条规则继续起作用。
     stripped = _CAPACITY_SUFFIX.sub("", model)
     if stripped != model:
-        base.update({stripped, stripped.replace(" ", "")})
+        forms.add(stripped)
 
+    # ③ 粘连（见 _GLUE_SUFFIX 注释：两种写法必须都有）
+    forms |= {_GLUE_SUFFIX.sub(r"\1\2", f) for f in list(forms)}
+
+    # ③b 品牌与数字粘连（见 _GLUE_BRAND 注释）
+    forms |= {_GLUE_BRAND.sub(lambda m: m.group(1), f) for f in list(forms)}
+
+    # ④ 容量写法 G ↔ GB
+    forms |= {_TO_GB.sub(r"\1GB", f) for f in list(forms)}
+    forms |= {_TO_G.sub(r"\1G", f) for f in list(forms)}
+
+    # ⑤ 去空格（"RTX2080" / "RTX308012G" 这类）
+    forms |= {f.replace(" ", "") for f in list(forms)}
+
+    return forms
+
+
+def build_aliases(model: str) -> str:
+    """为型号生成别名串（逗号分隔），供跨平台标题匹配使用。
+
+    变体越多命中率越高，但**每一条都仍受字母数字边界校验约束**
+    （见 `services/normalize.ModelMatcher`）—— 所以 "3070" 不会命中
+    "3070Ti"，"2080" 不会命中 "2080Super"。放宽的是"同一型号的写法差异"，
+    不是"相邻型号的区分"。
+    """
+    base = _alias_variants(model)
     for alias in _EXTRA_ALIASES.get(model, []):
         base.add(alias)
     return ",".join(sorted(a for a in base if a))
