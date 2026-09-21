@@ -545,7 +545,16 @@ def _keep_hidden(profile_dir: Path | str, seconds: float, restore_to: str | None
     start = time.time()
     while time.time() - start < seconds:
         hide_browser_app(profile_dir)
-        if restore_to and frontmost_app_name() == "Google Chrome":
+        # 归还焦点的判据：**当前最前台不是用户原来的应用，且它要么是 Chrome、
+        # 要么取不到名字**。取不到名字也算 —— 启动瞬间 System Events 偶尔
+        # 会返回空串，旧写法只判 == "Google Chrome" 会把这种情况漏掉，
+        # 于是焦点被占着不还（实测占过 2 秒）。
+        #
+        # 不无条件归还：若用户在这 12 秒里自己切到了别的应用，就不动他。
+        current = frontmost_app_name()
+        if restore_to and current != restore_to and (
+            current is None or current in ("", "Google Chrome")
+        ):
             restore_front_app(restore_to)
         time.sleep(0.25 if time.time() - start < 4.0 else 0.8)
 
