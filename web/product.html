@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>型号详情 · DIY 配件价格追踪</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <div class="page-desc"><a href="/products" class="muted">← 返回型号列表</a></div>
+        <h1 class="page-title" id="title" style="margin-top:6px">加载中…</h1>
+        <div class="page-desc" id="subtitle"></div>
+      </div>
+      <div class="toolbar">
+        <select class="select" id="daysSelect">
+          <option value="30">近 30 天</option>
+          <option value="90" selected>近 90 天</option>
+          <option value="180">近 180 天</option>
+          <option value="365">近 365 天</option>
+        </select>
+        <button class="btn" id="btnCompare">加入对比</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-body">
+        <div class="detail-head">
+          <div>
+            <div class="detail-title" id="priceMain">—</div>
+            <div class="detail-meta" id="priceMeta">—</div>
+          </div>
+          <div class="detail-price">
+            <div class="big" id="priceNew">—</div>
+            <div class="detail-meta">全新平台最低价</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">趋势指标</div><span class="muted" id="signalText">—</span></div>
+      <div class="metric-grid" id="metrics"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">价格走势</div>
+        <span class="muted">全市场最低价 / 全新最低价 / 二手最低价 与移动均线</span>
+      </div>
+      <div class="panel-body"><div class="chart chart-lg" id="chartTrend"></div></div>
+    </div>
+
+    <div class="grid grid-2" style="margin-bottom:14px">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">各平台价格对比</div><span class="muted">最新一日</span></div>
+        <div class="panel-body"><div class="chart chart-md" id="chartPlatform"></div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">平台明细</div><span class="muted" id="spreadText">—</span></div>
+        <div style="overflow-x:auto">
+          <table class="data">
+            <thead>
+              <tr>
+                <th>平台</th><th>类型</th>
+                <th class="num">最低价</th><th class="num">均价</th><th class="num">最高价</th>
+                <th class="num">较最低</th>
+              </tr>
+            </thead>
+            <tbody id="platformTbody"><tr><td colspan="6" class="loading">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><div class="panel-title">历史价格区间</div><span class="muted" id="historyText">—</span></div>
+      <div class="panel-body"><div class="chart chart-sm" id="chartHistory"></div></div>
+    </div>
+  </main>
+</div>
+
+<script defer src="/static/js/vendor/echarts.min.js"></script>
+<script defer src="/static/js/common.js"></script>
+<script defer src="/static/js/product.js"></script>
+</body>
+</html>

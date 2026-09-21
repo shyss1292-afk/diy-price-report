@@ -1,0 +1,651 @@
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-2: #fafbfc;
+  --border: #e5e7eb;
+  --border-strong: #d5d8de;
+  --text: #16191d;
+  --text-2: #5c626d;
+  --text-3: #9aa1ac;
+  --up: #d93025;
+  --up-soft: #fdecea;
+  --down: #0f9d58;
+  --down-soft: #e9f6ef;
+  --flat: #8a9099;
+  --accent: #2f6fed;
+  --accent-soft: #eaf1fe;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: inherit; text-decoration: none; }
+
+/* ---------------------------------------------------------------- 布局 */
+.app { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 208px;
+  flex: 0 0 208px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 20px 14px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.brand { padding: 0 8px 18px; }
+.brand-title { font-size: 14px; font-weight: 500; letter-spacing: 0.2px; }
+.brand-sub { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav-item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  color: var(--text-2); font-size: 13px;
+}
+.nav-item:hover { background: var(--panel-2); color: var(--text); }
+.nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.nav-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: 0.5; }
+.nav-item.active .nav-dot { opacity: 1; }
+
+.sidebar-foot {
+  margin-top: 22px; padding: 10px 10px 0;
+  border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text-3); line-height: 1.7;
+}
+.sidebar-foot b { display: block; color: var(--text-2); font-weight: 500; margin-bottom: 3px; }
+
+.main { flex: 1; min-width: 0; padding: 20px 24px 48px; }
+
+.page-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; margin-bottom: 18px; flex-wrap: wrap;
+}
+.page-title { font-size: 18px; font-weight: 500; margin: 0; }
+.page-desc { font-size: 12px; color: var(--text-3); margin-top: 3px; }
+
+/* ---------------------------------------------------------------- 卡片 */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 13px 16px; border-bottom: 1px solid var(--border);
+}
+.panel-title { font-size: 13px; font-weight: 500; }
+.panel-body { padding: 14px 16px; }
+.panel-body.tight { padding: 8px 10px; }
+
+.grid { display: grid; gap: 14px; }
+.grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-cards { grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); }
+
+/* 首页「重点关注型号」按板块分块：核心配件 / 其他硬件 各自独立，不混排 */
+.card-section + .card-section {
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);
+}
+.card-section-head {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px;
+}
+.card-section-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.card-section-hint { font-size: 11px; color: var(--text-3); }
+
+/* ---------------------------------------------------------------- KPI */
+.kpi { padding: 14px 16px; }
+.kpi-label { font-size: 12px; color: var(--text-3); }
+.kpi-value {
+  font-size: 24px; font-weight: 500; margin-top: 6px;
+  font-variant-numeric: tabular-nums; letter-spacing: -0.4px;
+}
+.kpi-foot { font-size: 11px; color: var(--text-3); margin-top: 5px; }
+
+/* ------------------------------------------------- 采集覆盖（首页板块） */
+/* 三个大指标 + 一条完成率进度条 + 各平台明细表 */
+.cov-metrics {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px; margin-bottom: 14px;
+}
+.cov-metric-label { font-size: 12px; color: var(--text-3); }
+.cov-metric-value {
+  font-size: 24px; font-weight: 500; margin-top: 4px;
+  font-variant-numeric: tabular-nums; letter-spacing: -.4px;
+}
+.cov-metric-value.sm { font-size: 16px; padding-top: 8px; }
+.cov-metric-foot { font-size: 11px; color: var(--text-3); margin-top: 3px; }
+
+.cov-bar {
+  height: 8px; border-radius: 5px; background: var(--panel-2);
+  border: 1px solid var(--border); overflow: hidden; margin-bottom: 16px;
+}
+.cov-bar > i {
+  display: block; height: 100%; border-radius: 4px;
+  background: var(--accent); transition: width .5s ease;
+}
+
+/* 完成率做成"数字 + 迷你条"，一排扫下来能立刻看出差距 */
+.cov-rate { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.cov-rate-bar {
+  width: 54px; height: 6px; border-radius: 3px;
+  background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; flex: 0 0 auto;
+}
+.cov-rate-bar > i { display: block; height: 100%; background: var(--accent); }
+.cov-rate-num { font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+
+.cov-plat { display: inline-flex; align-items: center; gap: 7px; }
+.cov-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.cov-kind {
+  font-size: 10px; padding: 1px 6px; border-radius: 9px;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--text-3);
+}
+.cov-note {
+  font-size: 11.5px; color: var(--text-3);
+  margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); line-height: 1.75;
+}
+.cov-note b { color: var(--text-2); font-weight: 500; }
+
+/* ---------------------------------------------------------------- 涨跌 */
+.up { color: var(--up); }
+.down { color: var(--down); }
+.flat { color: var(--flat); }
+.bg-up { background: var(--up-soft); }
+.bg-down { background: var(--down-soft); }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 7px; border-radius: 20px;
+  font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 500;
+}
+.pill.up { background: var(--up-soft); color: var(--up); }
+.pill.down { background: var(--down-soft); color: var(--down); }
+.pill.flat { background: #f1f2f4; color: var(--flat); }
+.pill.tag { background: #f1f2f4; color: var(--text-2); font-weight: 400; }
+.pill.tag.good { background: var(--down-soft); color: var(--down); }
+.pill.tag.warn { background: var(--up-soft); color: var(--up); }
+.pill.tag.neutral { background: #f1f2f4; color: var(--text-2); }
+.pill.new { background: var(--accent-soft); color: var(--accent); font-weight: 400; }
+.pill.used { background: #fdf3e3; color: #a4700d; font-weight: 400; }
+
+/* ---------------------------------------------------------------- 表格 */
+table.data { width: 100%; border-collapse: collapse; }
+table.data th {
+  text-align: left; font-weight: 400; font-size: 12px; color: var(--text-3);
+  padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+table.data td {
+  padding: 9px 12px; border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+table.data tbody tr:last-child td { border-bottom: none; }
+table.data tbody tr:hover { background: var(--panel-2); }
+table.data tr.clickable { cursor: pointer; }
+table.data .num { text-align: right; }
+table.data .model-cell { font-variant-numeric: normal; }
+table.data .model-cell b { font-weight: 500; }
+
+/* 型号列表最多 300+ 行，每行还带一个内联 SVG 迷你走势图。
+   默认浏览器要为整表建立渲染对象，滚动时反复重绘。
+   content-visibility: auto 让视口外的行**完全跳过布局与绘制**，
+   contain-intrinsic-size 的 auto 关键字会记住实测行高，避免滚动条抖动。 */
+table.data tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 48px;
+}
+
+/* ---------------------------------------------------------------- 卡片网格 */
+.pcard {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); padding: 13px 14px;
+  transition: border-color .15s, transform .15s;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.pcard:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+.pcard-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.pcard-model { font-size: 13px; font-weight: 500; line-height: 1.4; }
+.pcard-spec { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+.pcard-price { font-size: 19px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; }
+.pcard-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+.pcard-sub { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.spark { display: block; }
+
+/* ---------------------------------------------------------------- 表单 */
+input, select, button { font-family: inherit; font-size: 13px; }
+.input, .select {
+  height: 32px; padding: 0 10px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--panel); color: var(--text); outline: none;
+}
+.input:focus, .select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,111,237,.1); }
+.input::placeholder { color: var(--text-3); }
+
+.btn {
+  height: 32px; padding: 0 14px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: var(--panel);
+  color: var(--text); cursor: pointer; transition: background .15s, border-color .15s;
+}
+.btn:hover { background: var(--panel-2); border-color: var(--text-3); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { background: #2560d8; border-color: #2560d8; }
+.btn-sm { height: 27px; padding: 0 10px; font-size: 12px; }
+
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.chip {
+  padding: 4px 11px; border-radius: 20px; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--panel);
+  color: var(--text-2); font-size: 12px;
+}
+.chip:hover { border-color: var(--text-3); color: var(--text); }
+.chip.active { background: var(--text); border-color: var(--text); color: #fff; }
+
+/* 品类按板块分行：「核心配件」与「其他硬件」各占一行，不再混排。
+   用 flex-basis:100% 让每组强制换行，这样 .chips 本身仍是平铺容器，
+   对比页那种不分组的一行 chips 不受影响。 */
+.chip-row { flex-basis: 100%; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.chip-row + .chip-row { margin-top: 1px; }
+.chip-row-label {
+  flex: 0 0 auto; min-width: 56px;
+  font-size: 11px; font-weight: 500; color: var(--text-3); letter-spacing: .3px;
+}
+
+/* ---------------------------------------------------------------- 图表 */
+.chart { width: 100%; }
+.chart-lg { height: 380px; }
+.chart-md { height: 260px; }
+.chart-sm { height: 180px; }
+.empty-chart {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-3); font-size: 12px;
+}
+
+/* ---------------------------------------------------------------- 排行 */
+.rank-list { display: flex; flex-direction: column; }
+.rank-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px; border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.rank-row:last-child { border-bottom: none; }
+.rank-row:hover { background: var(--panel-2); }
+.rank-idx {
+  width: 17px; height: 17px; flex: 0 0 17px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 4px; background: #f1f2f4; color: var(--text-3);
+  font-size: 11px;
+}
+.rank-name { flex: 1; min-width: 0; }
+.rank-name b { font-weight: 500; display: block; font-size: 12.5px; }
+.rank-name span { font-size: 11px; color: var(--text-3); }
+.rank-price { text-align: right; font-variant-numeric: tabular-nums; }
+.rank-price b { font-weight: 500; display: block; font-size: 12.5px; }
+.rank-price span { font-size: 11px; }
+
+/* ---------------------------------------------------------------- 指标 */
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 1px; background: var(--border); }
+.metric {
+  background: var(--panel); padding: 12px 14px;
+}
+.metric-label { font-size: 11px; color: var(--text-3); }
+.metric-value { font-size: 16px; font-weight: 500; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.metric-note { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+
+/* ---------------------------------------------------------------- 其他 */
+.detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+.detail-title { font-size: 20px; font-weight: 500; letter-spacing: -0.3px; }
+.detail-meta { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+.detail-price { text-align: right; }
+.detail-price .big { font-size: 30px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -0.8px; }
+
+.toast {
+  position: fixed; right: 20px; bottom: 20px; z-index: 100;
+  background: #16191d; color: #fff; padding: 10px 16px;
+  border-radius: var(--radius-sm); font-size: 12.5px;
+  opacity: 0; transform: translateY(8px); transition: opacity .2s, transform .2s;
+  pointer-events: none; max-width: 340px;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.err { background: #a3241c; }
+
+.loading { color: var(--text-3); font-size: 12px; padding: 24px; text-align: center; }
+.sep { height: 1px; background: var(--border); }
+.muted { color: var(--text-3); }
+.mono { font-variant-numeric: tabular-nums; }
+
+@media (max-width: 1100px) {
+  .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid-3, .grid-2 { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .sidebar { display: none; }
+  .main { padding: 16px; }
+  .grid-4 { grid-template-columns: 1fr; }
+}
+
+/* ================================================================
+   价格日报（表格形态，参考 @芝士华莱士 显卡日报的表设计）
+   ================================================================ */
+
+.disclaimer {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.7;
+}
+.disclaimer b { color: var(--text); font-weight: 600; }
+
+/* 控制栏 */
+.ctrl-row {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 10px; margin: 12px 0;
+}
+.ctrl-label { font-size: 12px; color: var(--text-3); margin-right: -4px; }
+.tabs { display: flex; gap: 2px; background: var(--panel-2); padding: 2px; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.tab {
+  padding: 5px 11px; border-radius: 4px; font-size: 12.5px;
+  color: var(--text-2); cursor: pointer; white-space: nowrap;
+  border: none; background: none;
+}
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--panel); color: var(--text); box-shadow: var(--shadow); font-weight: 500; }
+.tab .cnt { color: var(--text-3); font-size: 11px; margin-left: 4px; }
+
+/* 表格容器：横向滚动 + 首列吸附 */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+table.rpt {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+table.rpt th, table.rpt td {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  text-align: right;
+}
+table.rpt thead th {
+  position: sticky; top: 0; z-index: 3;
+  background: var(--panel-2);
+  color: var(--text-2);
+  font-weight: 500;
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--border-strong);
+}
+table.rpt thead tr:first-child th { top: 0; }
+table.rpt thead tr:nth-child(2) th { top: 29px; }
+
+/* 首列吸附 */
+.rpt .stick-l {
+  position: sticky; left: 0; z-index: 2;
+  background: var(--panel);
+  text-align: left;
+  border-right: 1px solid var(--border);
+}
+table.rpt thead .stick-l { z-index: 4; background: var(--panel-2); }
+.rpt tbody tr:hover .stick-l { background: #f8f9fb; }
+.rpt tbody tr:hover td { background: #f8f9fb; }
+
+.rpt .model { font-weight: 500; }
+.rpt .model .sub { display: block; font-weight: 400; font-size: 11px; color: var(--text-3); }
+
+/* 平台列分组头 */
+.rpt th.plat-head { text-align: center; border-left: 1px solid var(--border); }
+.rpt th.plat-head .kind {
+  display: inline-block; font-size: 10px; padding: 0 4px; border-radius: 3px;
+  margin-left: 3px; vertical-align: 1px;
+}
+.rpt th.plat-head.real .kind { background: var(--accent-soft); color: var(--accent); }
+.rpt th.plat-head.synth .kind { background: #f0f1f3; color: var(--text-3); }
+.rpt td.plat-cell { text-align: center; border-left: 1px solid var(--border); min-width: 88px; }
+.rpt td.plat-cell.synth { background: #fbfbfc; }
+.rpt td.plat-cell .px { display: block; font-weight: 500; }
+.rpt td.plat-cell .px.empty { color: var(--text-3); font-weight: 400; }
+
+/* 涨跌色块：沿用中国习惯 —— 涨红跌绿 */
+.chg {
+  display: inline-block; min-width: 46px;
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 11px; line-height: 1.5;
+}
+.chg.up { background: var(--up-soft); color: var(--up); }
+.chg.down { background: var(--down-soft); color: var(--down); }
+.chg.flat { background: #f0f1f3; color: var(--flat); }
+
+/* 数值强调 */
+.rpt .hist { color: var(--down); }
+.rpt .daylow { font-weight: 600; }
+.rpt .vsbase { font-size: 10.5px; color: var(--text-3); display: block; }
+.rpt .vi { font-weight: 600; color: var(--accent); }
+.rpt .vi.na { color: var(--text-3); font-weight: 400; }
+
+/* 最低平台单元格 */
+.rpt .best { text-align: left; }
+.rpt .best .plat { font-weight: 500; }
+.rpt .best .shop { display: block; font-size: 10.5px; color: var(--text-3); max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+
+.rpt .real-dot { color: var(--accent); font-size: 10px; margin-left: 2px; }
+.rpt .na { color: var(--text-3); }
+
+/* 结论条 */
+.conclusion {
+  margin-top: 12px;
+  display: flex; flex-wrap: wrap; gap: 8px 20px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.conclusion b { color: var(--text); }
+.conclusion .up { color: var(--up); }
+.conclusion .down { color: var(--down); }
+
+.legend {
+  display: flex; flex-wrap: wrap; gap: 6px 16px;
+  font-size: 11.5px; color: var(--text-3); margin-top: 10px;
+}
+.legend i { font-style: normal; }
+.legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: 0; }
+
+/* ---------------------------------------------------------------- 日报：表头/表尾/对齐 */
+
+/* 表格上方的标题与口径说明（对应参考页面的标题行 + 免责声明行） */
+.rp-cap {
+  padding: 13px 16px 11px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.rp-note {
+  padding: 8px 16px;
+  font-size: 11.5px;
+  line-height: 1.85;
+  color: var(--text-2);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.rp-note b { color: var(--text); font-weight: 600; }
+
+/* 底部结论条（对应参考页面的滚动结论） */
+.rp-foot {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel-2);
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.rp-foot b { color: var(--text); }
+.rp-foot .up { color: var(--up); }
+.rp-foot .down { color: var(--down); }
+.rp-foot .dot { color: var(--text-3); }
+
+/* 对齐工具类 */
+.rpt .al-left { text-align: left; }
+.rpt .al-right { text-align: right; }
+.rpt .al-center { text-align: center; }
+
+/* 双行表头：第一行分组、第二行子列 */
+table.rpt thead th { vertical-align: middle; }
+table.rpt thead .plat-head {
+  text-align: center;
+  border-left: 1px solid var(--border-strong);
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 600;
+}
+table.rpt thead .plat-sub {
+  top: 0;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+  text-align: center;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--panel-2);
+}
+table.rpt thead tr:nth-child(1) th { top: 0; }
+table.rpt thead tr:nth-child(2) th { top: 30px; }
+/* 跨两行的固定列表头需要同时在两个方向吸附 */
+table.rpt thead .stick-l { top: 0; left: 0; z-index: 5; }
+
+/* 型号列 */
+.rpt .mdl { font-weight: 700; font-size: 13px; letter-spacing: 0.2px; }
+
+/* ===== 以下为对齐参考表格的视觉语言 =====
+   原版有一套很讲究的配色约定，逐条对照：
+     史低价  → 蓝色数字（区别于日低价的黑）
+     跑分    → 淡蓝底色块
+     性价比  → 蓝色竖条指示器 + 数字（条长按数值成比例）
+     现价    → 淡灰底色块，形成"价格卡"的观感
+     涨跌幅  → 实心红/绿块 + 白字，几乎填满单元格
+*/
+
+/* 史低价：蓝色 */
+.rpt .hist { color: #1a6fd4; font-weight: 600; }
+
+/* 史低价数据不足时的"积累中 N/M 天"提示 —— 说明为什么空、还差多久 */
+.rpt .accum {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: #f4f5f7;
+  color: #98a0ab;
+  font-size: 11px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* 日低价：黑色加粗，字号略大 */
+.rpt .daylow { font-weight: 700; font-size: 13.5px; }
+
+/* TSE / R23 跑分：淡蓝底色块 */
+.rpt .bench {
+  display: inline-block;
+  min-width: 52px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: #e3edfb;
+  color: #1b4f96;
+  font-weight: 600;
+}
+
+/* 性价比：蓝色竖条 + 数字 */
+.rpt .vi-cell { display: inline-flex; align-items: center; gap: 5px; justify-content: flex-end; }
+.rpt .vi-bar {
+  display: inline-block; height: 15px; border-radius: 1px;
+  background: #2f6fed; vertical-align: middle;
+}
+.rpt .vi-bar.low { background: #9db8e8; }        /* 性价比偏低时用浅蓝 */
+.rpt .vi { font-weight: 700; color: #16191d; }
+.rpt .vi.na { color: var(--text-3); font-weight: 400; }
+
+/* 现价：淡灰底色块 */
+.rpt td.plat-cell .px {
+  display: block;
+  padding: 2px 6px;
+  border-radius: 2px;
+  background: #f4f5f7;
+  font-weight: 700;
+  font-size: 13px;
+}
+.rpt td.plat-cell .px.empty { background: none; font-weight: 400; }
+
+/* 涨跌幅：实心色块 + 白字（原版就是红/绿实心块） */
+.chg {
+  display: block;
+  margin-top: 3px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.2px;
+}
+.chg.up { background: #d93025; color: #fff; }
+.chg.down { background: #0f9d58; color: #fff; }
+.chg.flat { background: #e9ebee; color: #6b7280; }
+.rpt .na { color: var(--text-3); font-weight: 400; }
+
+/* 平台单元格：现价在上、涨跌幅在下 */
+.rpt td.plat-cell { vertical-align: middle; padding: 4px 6px; }
+
+/* 店铺 / 型号文本 */
+.rpt .shop-link { color: var(--accent); text-decoration: none; }
+.rpt .shop-link:hover { text-decoration: underline; }
+.rpt .shop { display: inline-block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.rpt .sub { display: block; font-size: 10.5px; color: var(--text-3); font-weight: 400; }
+
+
+
+/* ------------------------------------------------- 型号列表：三平台价格列 */
+/* 模拟数据必须一眼可辨 —— 拿模拟价去比价比没有更糟 */
+.mock-price {
+  color: var(--text-3);
+  text-decoration: line-through;
+  text-decoration-color: var(--border-strong);
+}
+.mock-tag {
+  display: inline-block; margin-left: 3px; padding: 0 4px;
+  font-size: 9.5px; line-height: 15px; border-radius: 3px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  color: var(--text-3); vertical-align: 1px;
+}
+/* 三平台列加一道浅底，与"全市场最低"这类的汇总列区分开 */
+table.data th.plat-col { background: var(--panel-2); }

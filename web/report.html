@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>价格日报 · DIY 配件价格追踪</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">价格日报</h1>
+        <div class="page-desc" id="pageDesc">正在加载…</div>
+      </div>
+      <div class="toolbar">
+        <button class="btn" id="btnRefresh">刷新</button>
+        <button class="btn" id="btnExport">导出 CSV</button>
+      </div>
+    </div>
+
+    <div class="ctrl-row">
+      <div class="tabs" id="catTabs"></div>
+      <span class="ctrl-label" style="margin-left:10px">口径</span>
+      <select class="select" id="basisSelect">
+        <option value="all" selected>全市场（含二手）</option>
+        <option value="new">仅全新</option>
+        <option value="used">仅二手</option>
+      </select>
+      <span class="ctrl-label" style="margin-left:10px">平台</span>
+      <div class="tabs" id="platTabs"></div>
+      <span class="ctrl-label" style="margin-left:10px">窗口</span>
+      <select class="select" id="daysSelect">
+        <option value="30">30 天</option>
+        <option value="180" selected>180 天</option>
+        <option value="365">365 天</option>
+      </select>
+    </div>
+
+    <div class="grid grid-4" style="margin-bottom:12px">
+      <div class="panel kpi">
+        <div class="kpi-label">入表型号</div>
+        <div class="kpi-value" id="kpiCount">—</div>
+        <div class="kpi-foot" id="kpiCountFoot">—</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">上涨</div>
+        <div class="kpi-value up" id="kpiUp">—</div>
+        <div class="kpi-foot" id="kpiUpFoot">—</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">下跌</div>
+        <div class="kpi-value down" id="kpiDown">—</div>
+        <div class="kpi-foot" id="kpiDownFoot">—</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">真实报价覆盖</div>
+        <div class="kpi-value" id="kpiReal" style="font-size:19px">—</div>
+        <div class="kpi-foot" id="kpiRealFoot">—</div>
+      </div>
+    </div>
+
+    <!-- 表格区：结构与参考页面一致（标题 + 免责说明 + 双行分组表头 + 结论条） -->
+    <div class="panel" style="padding:0;overflow:hidden">
+      <div class="rp-cap" id="rpCaption">—</div>
+      <div class="rp-note" id="rpNote"></div>
+      <div class="table-wrap">
+        <table class="rpt" id="rptTable">
+          <thead id="rptHead"></thead>
+          <tbody id="rptBody"></tbody>
+        </table>
+      </div>
+      <div class="rp-foot" id="rpFoot"></div>
+    </div>
+
+    <div class="legend">
+      <i><span class="sw" style="background:var(--up-soft);border:1px solid var(--up)"></span>涨价</i>
+      <i><span class="sw" style="background:var(--down-soft);border:1px solid var(--down)"></span>降价</i>
+      <i><span class="sw" style="background:#eaf7ea;border:1px solid #3a9b3a"></span>NVIDIA</i>
+      <i><span class="sw" style="background:#fdecea;border:1px solid #d93025"></span>AMD</i>
+      <i><span class="sw" style="background:#eaf1fe;border:1px solid #2f6fed"></span>Intel</i>
+      <i id="lgBasis">涨跌幅单位为元</i>
+    </div>
+  </main>
+</div>
+
+<script defer src="/static/js/common.js"></script>
+<script defer src="/static/js/report.js"></script>
+</body>
+</html>

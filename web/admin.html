@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>采集管理 · DIY 配件价格追踪</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">采集管理</h1>
+        <div class="page-desc" id="pageDesc">查看采集任务状态、数据量与执行日志</div>
+      </div>
+      <div class="toolbar">
+        <select class="select" id="backfillDays">
+          <option value="30">回填 30 天</option>
+          <option value="90">回填 90 天</option>
+          <option value="180" selected>回填 180 天</option>
+          <option value="365">回填 365 天</option>
+        </select>
+        <button class="btn" id="btnBackfill">执行回填</button>
+        <button class="btn btn-primary" id="btnCollect">立即采集</button>
+      </div>
+    </div>
+
+    <div class="grid grid-4" style="margin-bottom:14px">
+      <div class="panel kpi">
+        <div class="kpi-label">采集状态</div>
+        <div class="kpi-value" id="kpiState" style="font-size:19px">—</div>
+        <div class="kpi-foot" id="kpiStateFoot">—</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">明细快照</div>
+        <div class="kpi-value" id="kpiListings">—</div>
+        <div class="kpi-foot">listings 表行数</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">日聚合行</div>
+        <div class="kpi-value" id="kpiDaily">—</div>
+        <div class="kpi-foot">price_daily 表行数</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">数据日期范围</div>
+        <div class="kpi-value" id="kpiRange" style="font-size:15px">—</div>
+        <div class="kpi-foot" id="kpiRangeFoot">—</div>
+      </div>
+    </div>
+
+    <div class="grid grid-2" style="margin-bottom:14px">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">定时任务</div><span class="muted">APScheduler</span></div>
+        <div class="panel-body" id="jobs"><div class="loading">加载中…</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">最近一次采集结果</div><span class="muted" id="lastRunAt">—</span></div>
+        <div class="panel-body" id="lastResult"><div class="muted">尚无记录</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title">采集日志</div>
+        <button class="btn btn-sm" id="btnRefresh">刷新</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>时间</th><th>数据源</th><th>触发方式</th><th>状态</th>
+              <th class="num">写入条数</th><th class="num">耗时</th><th>说明</th>
+            </tr>
+          </thead>
+          <tbody id="logTbody"><tr><td colspan="7" class="loading">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script defer src="/static/js/common.js"></script>
+<script defer src="/static/js/admin.js"></script>
+</body>
+</html>

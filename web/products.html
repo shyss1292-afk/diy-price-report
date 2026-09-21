@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>型号列表 · DIY 配件价格追踪</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">型号列表</h1>
+        <div class="page-desc" id="pageDesc">正在加载…</div>
+      </div>
+      <div class="toolbar">
+        <input class="input" id="searchInput" placeholder="搜索型号或品牌" style="width:190px">
+        <select class="select" id="basisSelect">
+          <option value="all" selected>全市场最低价</option>
+          <option value="new">全新最低价</option>
+          <option value="used">二手最低价</option>
+        </select>
+        <select class="select" id="periodSelect">
+          <option value="1">日涨跌</option>
+          <option value="7" selected>7 日涨跌</option>
+          <option value="30">30 日涨跌</option>
+        </select>
+        <select class="select" id="sortSelect">
+          <option value="brand" selected>品牌（默认）</option>
+          <option value="bench">性能跑分从高到低</option>
+          <option value="price">价格从高到低</option>
+          <option value="price_asc">价格从低到高</option>
+          <option value="change">涨幅优先</option>
+          <option value="change_asc">跌幅优先</option>
+          <option value="pctile">历史分位从低到高</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head" style="padding:10px 16px">
+        <div class="chips" id="chips"></div>
+        <span class="muted" id="countHint">—</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="data" id="productTable">
+          <thead>
+            <tr>
+              <th class="model-cell">型号</th>
+              <th>品类</th>
+              <th class="num" title="3DMark Time Spy Extreme 显卡分（参考值）">性能跑分</th>
+              <th class="num plat-col">京东</th>
+              <th class="num plat-col">拼多多</th>
+              <th class="num plat-col">闲鱼</th>
+              <th class="num" title="三个平台里最低的那个真实价（不含模拟数据）">三平台最低</th>
+              <th class="num">涨跌幅</th>
+              <th class="num">90 天分位</th>
+              <th style="text-align:center">30 天走势</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"><tr><td colspan="10" class="loading">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="panel-body tight" style="padding-top:0">
+        <div class="muted" style="font-size:11.5px" id="tableNote">
+          三个平台列取自各平台最新一天的<b>真实最低价</b>；灰显带「模」标的是模拟数据，不可用于比价；「—」表示该平台还没采到。
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script defer src="/static/js/common.js"></script>
+<script defer src="/static/js/products.js"></script>
+</body>
+</html>

@@ -1,0 +1,880 @@
+"""纯逻辑自检 —— 不依赖浏览器与网络，跑得很快。
+
+    python -m scripts.selftest
+
+存在的理由：有些 bug 不会抛异常、也不影响接口状态码，只在界面上表现为
+「这一列全是 —」。涨跌榜的 direction 语义就是如此 —— 排序键里的
+「无数据排最后」守卫被 `reverse=True` 一起反转，导致涨榜被 None 行占满，
+而跌榜恰好正常，所以长期没被发现。这类约定必须靠断言钉住。
+
+覆盖范围：
+  · 涨跌榜方向语义（最初的那批断言）
+  · 请求瘦身的拦截/放行规则（拦错了会让验证码白屏，且极难归因）
+  · 平台差异化节奏的数值边界（间隔必须夹取，否则会出现 0.2 秒连发）
+  · 限流识别的真阳性与**真阴性**（误判会白停一个源）
+  · 熔断器的冷却语义与持久化
+
+只放**与数据无关**的纯函数断言；涉及数据库的检查交给 scripts/diagnose.py。
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+from unittest import mock
+
+from app.services.trend import build_ranking
+
+PASSED: list[str] = []
+FAILED: list[str] = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    (PASSED if cond else FAILED).append(f"{name}{(' — ' + detail) if detail else ''}")
+
+
+def make(model: str, pct: float | None, latest: float = 100.0) -> dict:
+    return {"model": model, "change_pct": pct, "latest": latest}
+
+
+SAMPLE = [
+    make("涨30", 30.0), make("涨5", 5.0),
+    make("无数据-A", None), make("无数据-B", None),
+    make("跌8", -8.0), make("跌22", -22.0),
+    make("平0", 0.0),
+]
+
+
+# ====================================================================== 涨跌榜
+
+def test_ranking_direction() -> None:
+    # build_ranking 的 rows 参数允许直接传入快照，因此不碰数据库
+    up = build_ranking(None, direction="up", rows=SAMPLE, limit=10)  # type: ignore[arg-type]
+    down = build_ranking(None, direction="down", rows=SAMPLE, limit=10)  # type: ignore[arg-type]
+
+    check("涨榜只含上涨型号",
+          all((r["change_pct"] or 0) > 0 for r in up),
+          f"实际 {[(r['model'], r['change_pct']) for r in up]}")
+    check("涨榜按涨幅从高到低",
+          [r["model"] for r in up] == ["涨30", "涨5"],
+          f"实际 {[r['model'] for r in up]}")
+    check("跌榜只含下跌型号",
+          all((r["change_pct"] or 0) < 0 for r in down),
+          f"实际 {[(r['model'], r['change_pct']) for r in down]}")
+    check("跌榜按跌幅从大到小",
+          [r["model"] for r in down] == ["跌22", "跌8"],
+          f"实际 {[r['model'] for r in down]}")
+    check("两榜都不含无数据（change_pct 为 None）",
+          all(r["change_pct"] is not None for r in up + down))
+    check("持平（0%）不进入涨榜也不进入跌榜",
+          all(r["model"] != "平0" for r in up + down))
+    check("limit 生效",
+          len(build_ranking(None, direction="up", rows=SAMPLE, limit=1)) == 1)  # type: ignore[arg-type]
+    check("传入的共享快照未被改动",
+          [r["model"] for r in SAMPLE] == ["涨30", "涨5", "无数据-A", "无数据-B", "跌8", "跌22", "平0"])
+
+
+def test_ranking_empty() -> None:
+    only_none = [make("A", None), make("B", None)]
+    check("全部无数据时返回空列表（而不是塞满 None 行）",
+          build_ranking(None, direction="up", rows=only_none) == []  # type: ignore[arg-type]
+          and build_ranking(None, direction="down", rows=only_none) == [])  # type: ignore[arg-type]
+    check("空输入不报错",
+          build_ranking(None, direction="up", rows=[]) == [])  # type: ignore[arg-type]
+
+
+# ============================================================== 请求瘦身白名单
+
+def test_request_slimming() -> None:
+    """拦错一条就可能让验证码白屏，所以放行/拦截都要有断言。"""
+    from app.services.browser_worker import should_block
+
+    must_allow = [
+        # ⚠️ 用例 URL 刻意用「只含一个受测关键词」的虚构域名。
+        #    原因：白名单是子串匹配，如果 URL 里同时含平台主域
+        #    （如 `baxia.taobao.com` 同时命中 `baxia` 和 `taobao.com`），
+        #    删掉 `baxia` 这条规则测试照样通过 —— 用例会互相遮蔽，
+        #    等于没测。凡是能隔离的关键词都隔离。
+        # 阿里系自研风控 SDK（用户明确要求）
+        ("https://static-cdn.example.net/punish/entry.js", "script", "punish 惩罚页"),
+        ("https://rgv587-cdn.example.net/entry.js", "script", "rgv587 惩罚页资源"),
+        ("https://baxia-cdn.example.net/entry.js", "script", "baxia 霸下"),
+        ("https://awsc-cdn.example.net/sdk.js", "script", "awsc 云盾"),
+        ("https://uab-cdn.example.net/uab.js", "script", "uab 组件"),
+        ("https://um-cdn.example.net/js/um.js", "script", "um.js 统计脚本"),
+        # ⚠️ um.js 可能挂在 umeng.com 下，而该域名在打点黑名单里 ——
+        #    这条专门钉住"白名单优先级高于黑名单"这个相互作用
+        ("https://www.umeng.com/js/um.js", "script", "um.js 挂在 umeng 域下"),
+        # 域名型关键词（本身包含平台主域，无法隔离，属于预期内）
+        ("https://sec.taobao.com/risk.js", "script", "安全域 sec.taobao.com"),
+        ("https://risk.jd.com/fingerprint.js", "script", "风控域 risk.jd.com"),
+        ("https://anti.jd.com/v2/x.js", "script", "反爬域 anti.jd.com"),
+        ("https://blackhole-cdn.example.net/report", "xhr", "blackhole 黑洞"),
+        # 第三方验证码兜底
+        ("https://static.geetest.com/gt.js", "script", "极验（其它站兜底）"),
+        # image 一律放行（滑块背景图 / 缺口拼图）
+        ("https://cdn.example.com/captcha-piece.png", "image", "验证码碎片"),
+        ("https://img.example.net/verify/sprite.jpg", "image", "验证图 sprite"),
+        ("https://unknown-cdn.com/random.gif", "image", "任意图片"),
+        ("https://cdn.example.org/no-extension", "image", "无扩展名的图片"),
+        # 平台主域
+        ("https://search.jd.com/Search?keyword=x", "document", "京东搜索页"),
+        ("https://www.goofish.com/search?q=x", "document", "闲鱼搜索页"),
+        ("https://mobile.yangkeduo.com/x.js", "script", "拼多多主域"),
+    ]
+    bad = [
+        f"{label}: {'放行' if should_block(url, rt) else '拦截'}"
+        for url, rt, label in must_allow
+        if should_block(url, rt)
+    ]
+    check(f"白名单与 image 全部放行（{len(must_allow)} 例）", not bad, "; ".join(bad))
+
+    # 结构性断言：拦截面里绝不能出现 image。
+    # 行为断言之外再钉一层 —— 以后有人"顺手"把 image 加进这个集合时，
+    # should_block 里的显式早返回会兜住，但那属于意外；这里让它直接失败。
+    from app.services.browser_worker import _HEAVY_RESOURCE_TYPES
+
+    check("拦截资源类型集合里不含 image（防止误加导致验证码死锁）",
+          "image" not in _HEAVY_RESOURCE_TYPES,
+          f"实际 {sorted(_HEAVY_RESOURCE_TYPES)}")
+    check("拦截资源类型只含 media / font",
+          _HEAVY_RESOURCE_TYPES == {"media", "font"},
+          f"实际 {sorted(_HEAVY_RESOURCE_TYPES)}")
+
+    must_block = [
+        ("https://cdn.x.com/a.woff2", "font", "woff2 字体（按类型）"),
+        ("https://cdn.x.com/a.woff", "font", "woff 字体（按类型）"),
+        ("https://cdn.x.com/a.ttf", "font", "ttf 字体（按类型）"),
+        ("https://cdn.x.com/a.woff2?v=1", "other", "字体（按扩展名兜底）"),
+        ("https://cdn.x.com/promo.mp4", "media", "视频流"),
+        ("https://www.google-analytics.com/collect", "xhr", "GA 打点"),
+        ("https://hm.baidu.com/hm.js", "script", "百度统计"),
+        ("https://www.cnzz.com/stat.js", "script", "CNZZ 统计"),
+    ]
+    missed = [
+        f"{label}: 放行了"
+        for url, rt, label in must_block
+        if not should_block(url, rt)
+    ]
+    check(f"该拦的仍然拦住（{len(must_block)} 例）", not missed, "; ".join(missed))
+
+    check("白名单优先级高于扩展名（京东风控域名下的字体不拦）",
+          should_block("https://static.jd.com/blackhole/a.woff2", "font") is False)
+    check("普通脚本不被误拦",
+          should_block("https://apm.example.com/app.js", "script") is False)
+
+    # ---- 白名单**优先级**的精确用例 ----
+    #
+    # 上面那批关键词用例其实测不出"关键词是否还在白名单里"：它们本来就
+    # 没人拦（script 类型 + 非黑名单域名），把白名单条目删掉，请求照样放行，
+    # 用例仍然通过 —— 这叫做用例互相遮蔽，是"永远绿的测试"。
+    #
+    # 真正能验证优先级的是：URL 带受测关键词，**同时**这个请求在其他规则下
+    # 本应被拦（这里用显式打点黑名单域名）。此时只有白名单能救它。
+    priority_cases = [
+        ("punish", "https://www.google-analytics.com/punish.js"),
+        ("rgv587", "https://www.google-analytics.com/rgv587.js"),
+        ("baxia", "https://www.google-analytics.com/baxia.js"),
+        ("awsc", "https://www.google-analytics.com/awsc.js"),
+        ("uab", "https://www.google-analytics.com/uab.js"),
+        ("um.js", "https://www.google-analytics.com/js/um.js"),
+    ]
+    # 先证明这些 URL **去掉关键词后确实会被拦**，否则这组用例同样无意义
+    baseline_bad = [
+        url for _, url in priority_cases
+        if not should_block(url.replace("punish.js", "x.js")
+                            .replace("rgv587.js", "x.js")
+                            .replace("baxia.js", "x.js")
+                            .replace("awsc.js", "x.js")
+                            .replace("uab.js", "x.js")
+                            .replace("/js/um.js", "/js/x.js"), "script")
+    ]
+    check("优先级用例的前置条件成立（去掉关键词后确实会被拦）",
+          not baseline_bad, f"这些 URL 本身就放行，用例无意义：{baseline_bad}")
+
+    priority_bad = [
+        kw for kw, url in priority_cases if should_block(url, "script")
+    ]
+    check(f"白名单优先级压过打点黑名单（{len(priority_cases)} 个关键词）",
+          not priority_bad, f"被拦的关键词：{priority_bad}")
+
+
+# ============================================================== 平台节奏边界
+
+class _StubRandom:
+    """替身随机源：让高斯与长停顿都可预期。"""
+
+    def __init__(self, gauss_value: float, rnd: float) -> None:
+        self._gauss = gauss_value
+        self._rnd = rnd
+
+    def gauss(self, _mu: float, _sigma: float) -> float:
+        return self._gauss
+
+    def random(self) -> float:
+        return self._rnd
+
+    def uniform(self, a: float, b: float) -> float:
+        return (a + b) / 2.0
+
+
+def test_policy_delays() -> None:
+    from app.collectors import policy
+
+    # 高斯采样低于下界 → 必须被抬到 delay_floor，而不是"来一次快速连发"
+    with mock.patch.object(policy, "random", _StubRandom(-999.0, 0.99)):
+        low = [policy.next_delay("jd") for _ in range(5)]
+    check("低于下界被抬到 delay_floor（京东 3.0s）",
+          all(abs(v - 3.0) < 1e-6 for v in low), f"实际 {low}")
+
+    # 高斯采样高于上界 → 必须被压到 delay_ceil
+    with mock.patch.object(policy, "random", _StubRandom(999.0, 0.99)):
+        high = [policy.next_delay("jd") for _ in range(5)]
+    check("高于上界被压到 delay_ceil（京东 8.0s）",
+          all(abs(v - 8.0) < 1e-6 for v in high), f"实际 {high}")
+
+    # 命中长停顿分支：正常值 + 长停顿区间中值
+    with mock.patch.object(policy, "random", _StubRandom(5.0, 0.0)):
+        long_delay = policy.next_delay("jd")
+    check("偶发长停顿会叠加（5.0 + (10+25)/2 = 22.5s）",
+          abs(long_delay - 22.5) < 1e-6, f"实际 {long_delay}")
+
+    # 真实随机下界：绝不允许出现"过快的连发"
+    for code, floor in (("jd", 3.0), ("xianyu", 5.0), ("pdd", 6.0)):
+        samples = [policy.next_delay(code) for _ in range(2000)]
+        pol = policy.policy_for(code)
+        cap = pol.delay_ceil + pol.long_pause_range[1]
+        check(f"{pol.label} 2000 次采样都在 [{floor}, {cap}] 内",
+              min(samples) >= floor - 1e-9 and max(samples) <= cap + 1e-9,
+              f"实际 [{min(samples):.2f}, {max(samples):.2f}]")
+        check(f"{pol.label} 间隔确实在波动（不是固定值）",
+              len({round(v, 2) for v in samples}) > 100)
+
+    # 多标签并发是明确禁止的（并发请求会让"间隔随机化"失效）
+    check("三个平台都禁止多 Tab 并发",
+          all(not pol.allow_multi_tab for pol in policy.PLATFORM_THROTTLE_CONFIG.values()),
+          f"实际 {[(c, p.allow_multi_tab) for c, p in policy.PLATFORM_THROTTLE_CONFIG.items()]}")
+
+    # 单会话任务上限：拼多多按用户要求"严格控制在 15~20"
+    pdd = policy.PLATFORM_THROTTLE_CONFIG["pdd"]
+    check("拼多多单会话任务上限落在 15~20（用户指定）",
+          15 <= pdd.session_task_limit <= 20, f"实际 {pdd.session_task_limit}")
+
+    # 冷却时长符合约定
+    check("京东冷却 180s（用户指定）", policy.PLATFORM_THROTTLE_CONFIG["jd"].cooldown_seconds == 180)
+    check("闲鱼/拼多多冷却落在 240~300s（用户指定）",
+          all(240 <= policy.PLATFORM_THROTTLE_CONFIG[c].cooldown_seconds <= 300
+              for c in ("xianyu", "pdd")),
+          f"实际 闲鱼={policy.PLATFORM_THROTTLE_CONFIG['xianyu'].cooldown_seconds} "
+          f"拼多多={policy.PLATFORM_THROTTLE_CONFIG['pdd'].cooldown_seconds}")
+
+    check("拼多多要求等 networkidle（前端签名要先算完）",
+          policy.PLATFORM_THROTTLE_CONFIG["pdd"].wait_networkidle
+          and policy.PLATFORM_THROTTLE_CONFIG["pdd"].ready_extra_ms >= 500)
+
+    check("未知平台回落到兜底策略而不是抛异常",
+          policy.policy_for("unknown").code == "_default"
+          and policy.policy_for(None).code == "_default")
+
+    # 京东的核心分布应与需求一致：多数落在 3~8s
+    jd = [policy.next_delay("jd") for _ in range(2000)]
+    core_ratio = sum(1 for v in jd if v <= 8.0) / len(jd)
+    check("京东多数间隔落在 3~8s 核心区间（长停顿是少数）",
+          core_ratio > 0.8, f"实际 {core_ratio:.0%}")
+
+
+# ============================================================== 限流识别
+
+class _FakePage:
+    """只实现 detect_rate_limit 用到的三个接口。"""
+
+    def __init__(self, url: str = "", title: str = "", text: str = "") -> None:
+        self.url = url
+        self._title = title
+        self._text = text
+
+    def title(self) -> str:
+        return self._title
+
+    def evaluate(self, _js: str) -> str:  # noqa: ANN001
+        return self._text
+
+
+def test_rate_limit_detection() -> None:
+    from app.collectors import policy
+
+    positives = [
+        ("jd", _FakePage("https://search.jd.com/Search?keyword=x", "商品搜索",
+                         "抱歉由于访问频繁导致无法搜索，请稍后再试！"), "访问频繁", "京东文案"),
+        ("jd", _FakePage("https://search.jd.com/busy.html"), "busy.html", "京东 busy 页"),
+        ("jd", _FakePage("https://passport.jd.com/new/login.aspx"), "passport.jd.com", "被踢到登录页"),
+        ("xianyu", _FakePage("https://www.goofish.com/punish?x=1"), "punish", "闲鱼 punish 页"),
+        ("xianyu", _FakePage("https://www.goofish.com/search", "闲鱼",
+                             "系统繁忙，请稍后再试"), "系统繁忙", "闲鱼文案"),
+        ("xianyu", _FakePage("https://www.goofish.com/search", "",
+                             "非法访问 为了保障您的体验，请使用正常浏览器访问闲鱼~"),
+         "非法访问", "闲鱼拦截文案（实测出现过）"),
+        # 指标表里 `error_code=40001` 排在裸 `40001` 之前，命中的是更具体的那个
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", '{"error_code=40001"}'),
+         "error_code=40001", "拼多多错误码"),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", "访问异常 40001"),
+         "40001", "拼多多裸错误码"),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/verify.html"), "verify", "拼多多验证页"),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/login.html"), "login.html", "被踢到登录页"),
+    ]
+    misses = []
+    for code, page, expect, label in positives:
+        hit = policy.detect_rate_limit(page, code)
+        if not hit or hit[0] != expect:
+            misses.append(f"{label}: 期望「{expect}」实际 {hit}")
+    check(f"真阳性：{len(positives)} 种限流页都能识别", not misses, "; ".join(misses))
+
+    # 403 / 429 走状态码分支（不依赖页面内容）
+    check("HTTP 403 识别为限流",
+          (policy.detect_rate_limit(_FakePage("https://search.jd.com/"), "jd", 403) or [None])[0] == "HTTP 403")
+    check("HTTP 429 识别为限流",
+          (policy.detect_rate_limit(_FakePage("https://www.goofish.com/"), "xianyu", 429) or [None])[0] == "HTTP 429")
+
+    # ---- 真阴性：正常页面绝不能误判（误判会白停一个源）----
+    negatives = [
+        ("jd", _FakePage("https://search.jd.com/Search?keyword=RTX+5070",
+                         "RTX 5070 - 商品搜索 - 京东",
+                         "京东 全部分类 搜索 RTX 5070 显卡 七彩虹 ¥4599.00 自营 加入购物车")),
+        ("xianyu", _FakePage("https://www.goofish.com/search?q=RTX+5070", "闲鱼",
+                             "闲鱼 搜索 RTX 5070 显卡 九成新 ¥1899 包邮 我想要 宝贝详情")),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/search_result.html?search_key=x",
+                          "拼多多", "拼多多 搜索 显卡 ¥2688 已拼10万件 单独购买 发起拼单")),
+    ]
+    false_alarms = []
+    for code, page in negatives:
+        hit = policy.detect_rate_limit(page, code)
+        if hit:
+            false_alarms.append(f"{code}: 误判为「{hit[0]}」")
+    check("真阴性：正常商品页不会被误判为限流", not false_alarms, "; ".join(false_alarms))
+
+    # 异常页面（取不到标题/正文）不应崩，也不应误报
+    class _BrokenPage:
+        url = "about:blank"
+
+        def title(self):  # noqa: ANN201
+            raise RuntimeError("page crashed")
+
+        def evaluate(self, _js):  # noqa: ANN001, ANN201
+            raise RuntimeError("page crashed")
+
+    check("页面崩溃时检测不抛异常且不误报",
+          policy.detect_rate_limit(_BrokenPage(), "jd") is None)
+
+    # assert 版本必须抛熔断信号
+    try:
+        policy.assert_not_rate_limited(
+            _FakePage("https://search.jd.com/Search", "", "抱歉由于访问频繁导致无法搜索"), "jd"
+        )
+        check("assert_not_rate_limited 命中时抛 RateLimitError", False, "没抛异常")
+    except policy.RateLimitError as exc:
+        check("assert_not_rate_limited 命中时抛 RateLimitError",
+              exc.indicator == "访问频繁" and exc.source == "jd")
+    except Exception as exc:  # noqa: BLE001
+        check("assert_not_rate_limited 命中时抛 RateLimitError", False,
+              f"抛了 {type(exc).__name__}")
+
+    # 不应抛的场合
+    try:
+        policy.assert_not_rate_limited(
+            _FakePage("https://www.goofish.com/search?q=x", "闲鱼", "显卡 ¥1899"), "xianyu"
+        )
+        check("assert_not_rate_limited 正常页不抛", True)
+    except Exception as exc:  # noqa: BLE001
+        check("assert_not_rate_limited 正常页不抛", False, f"抛了 {type(exc).__name__}")
+
+
+# ============================================================== 熔断器
+
+def test_breaker() -> None:
+    from app.services import breaker
+
+    tmp = Path(tempfile.mkdtemp(prefix="diyprice_breaker_test_"))
+    original = breaker.BREAKER_FILE
+    breaker.BREAKER_FILE = tmp / "breaker.json"
+    try:
+        _run_breaker_cases(breaker, tmp)
+    finally:
+        breaker.BREAKER_FILE = original
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run_breaker_cases(breaker, tmp: Path) -> None:
+    check("初始状态无冷却", breaker.cooldown_remaining("jd") == 0.0
+          and not breaker.is_cooling("jd"))
+    check("初始 snapshot 为空", breaker.snapshot() == {})
+
+    # ---- 触发 ----
+    until = breaker.trip("jd", 180, "访问频繁")
+    remaining = breaker.cooldown_remaining("jd")
+    check("trip 后进入冷却且剩余时间合理",
+          170 < remaining <= 180, f"实际 {remaining:.1f}s")
+    check("is_cooling 为真", breaker.is_cooling("jd"))
+    check("冷却不影响其它源", not breaker.is_cooling("pdd"))
+    check("记录里带着原因与截止时间",
+          breaker.entry_of("jd")["reason"] == "访问频繁"
+          and breaker.entry_of("jd")["until_text"])
+
+    # ---- 持久化：换个"进程"读同一个文件 ----
+    raw = (tmp / "breaker.json").read_text(encoding="utf-8")
+    check("冷却状态已落盘（跨进程可见）", "访问频繁" in raw and "until" in raw)
+    check("无 .tmp 残留（原子写）", not list(tmp.glob("*.tmp")))
+    check("反序列化后仍处于冷却",
+          170 < breaker.cooldown_remaining("jd") <= 180)
+
+    # ---- 重复触发不缩短冷却 ----
+    before = breaker.cooldown_remaining("jd")
+    breaker.trip("jd", 10, "再次命中")
+    after = breaker.cooldown_remaining("jd")
+    check("重复 trip 时取较晚的截止时间（冷却不会被缩短）",
+          after >= before - 0.5, f"{before:.1f}s → {after:.1f}s")
+    check("累计触发次数被记录", breaker.entry_of("jd")["trips"] == 2)
+
+    # ---- wait_until_ready：三种分支 ----
+    t0 = time.monotonic()
+    ok, left = breaker.wait_until_ready("jd", "京东", max_wait=5.0)
+    elapsed = time.monotonic() - t0
+    check("剩余 > 上限时**不睡**且返回 False（避免拖住整轮）",
+          ok is False and left > 100 and elapsed < 1.0,
+          f"ok={ok} left={left:.0f} 耗时 {elapsed:.2f}s")
+
+    ok2, left2 = breaker.wait_until_ready("pdd", "拼多多")
+    check("没冷却的源立即放行", ok2 is True and left2 == 0.0)
+
+    breaker.clear("jd")
+    breaker.trip("jd", 0.4, "短冷却")
+    t0 = time.monotonic()
+    ok3, left3 = breaker.wait_until_ready("jd", "京东", max_wait=5.0)
+    waited = time.monotonic() - t0
+    check("剩余 ≤ 上限时真的睡够冷却再返回 True",
+          ok3 is True and left3 == 0.0 and waited >= 0.3,
+          f"ok={ok3} 睡了 {waited:.2f}s")
+    check("睡完后冷却已清空", breaker.cooldown_remaining("jd") == 0.0)
+
+    # ---- 过期条目不进 snapshot ----
+    breaker.clear()
+    breaker.trip("jd", 0, "已过期")
+    check("已过期的冷却不出现在 snapshot 里", "jd" not in breaker.snapshot())
+    check("已过期的冷却不影响放行",
+          breaker.wait_until_ready("jd")[0] is True)
+
+    # ---- 多源共存 + 整体清除 ----
+    breaker.trip("jd", 60, "a")
+    breaker.trip("pdd", 60, "b")
+    check("多源冷却互不干扰",
+          set(breaker.snapshot()) == {"jd", "pdd"}
+          and "闲鱼" not in breaker.active_summary())
+    check("active_summary 能同时列出两个源",
+          "jd" in breaker.active_summary() and "pdd" in breaker.active_summary())
+    removed = breaker.clear()
+    check("clear() 清空全部", removed == 2 and breaker.snapshot() == {})
+
+    # ============================================================ 跨轮次退避阶梯
+    # 用户 2026-09-21 指定的核心契约：
+    #   连续熔断 1 次 → 30min，2 次 → 2h，3 次 → 6h，4 次及以上 → 24h 封顶
+    #   Fast-Fail：退避期内**不等待**，直接跳过
+    #   成功重置：正常采到数据且无限流 → 连续计数清零
+    breaker.clear()
+    ladder = breaker.backoff_ladder()
+    check("退避阶梯默认 30min/2h/6h/24h",
+          ladder == (1800.0, 7200.0, 21600.0, 86400.0), f"实际 {ladder}")
+    check("阶梯逐级放大",
+          [breaker.backoff_for(n) for n in (1, 2, 3, 4)] == [1800.0, 7200.0, 21600.0, 86400.0])
+    check("阶梯末级封顶（第 5、9 次不再增长）",
+          breaker.backoff_for(5) == 86400.0 and breaker.backoff_for(9) == 86400.0)
+    check("backoff_for 对 0 / 负数取第 1 级（不越界）",
+          breaker.backoff_for(0) == 1800.0 and breaker.backoff_for(-3) == 1800.0)
+
+    # 生产路径：trip 不传 seconds → 走阶梯（传死值会让阶梯形同虚设）
+    breaker.trip("jd", reason="访问频繁")
+    check("trip 默认走阶梯第 1 级（30 分钟）",
+          1780 < breaker.cooldown_remaining("jd") <= 1800,
+          f"实际 {breaker.cooldown_remaining('jd'):.0f}s")
+    check("连续次数记为 1", breaker.consecutive_trips("jd") == 1)
+
+    breaker.trip("jd", reason="访问频繁")
+    check("连续第 2 次 → 冷却放大到 2 小时",
+          7180 < breaker.cooldown_remaining("jd") <= 7200,
+          f"实际 {breaker.cooldown_remaining('jd'):.0f}s")
+    check("连续次数记为 2", breaker.consecutive_trips("jd") == 2)
+
+    breaker.trip("jd", reason="访问频繁")
+    breaker.trip("jd", reason="访问频繁")
+    check("连续第 4 次 → 封顶 24 小时",
+          86380 < breaker.cooldown_remaining("jd") <= 86400)
+    check("连续次数记为 4", breaker.consecutive_trips("jd") == 4)
+
+    # ---- Fast-Fail：核心是"不睡" ----
+    t0 = time.monotonic()
+    ok, left = breaker.fast_fail("jd", "京东")
+    elapsed = time.monotonic() - t0
+    check("退避期内 Fast-Fail 返回 False 且**不睡**",
+          ok is False and left > 86000 and elapsed < 0.5,
+          f"ok={ok} left={left:.0f} 耗时 {elapsed:.3f}s")
+    check("Fast-Fail 不阻塞其它源", breaker.fast_fail("pdd", "拼多多")[0] is True)
+
+    # ---- 成功重置 ----
+    check("冷却期内 record_success 被拒绝（不许侥幸清零）",
+          breaker.record_success("jd") is False and breaker.consecutive_trips("jd") == 4)
+
+    breaker.clear("jd")
+    breaker.trip("jd", 0.2, "短冷却")
+    check("冷却未过期时 record_success 仍被拒绝", breaker.record_success("jd") is False)
+    time.sleep(0.3)
+    check("冷却过期后 record_success 清零成功", breaker.record_success("jd") is True)
+    check("清零后连续次数归零", breaker.consecutive_trips("jd") == 0)
+    check("清零后不再处于冷却", breaker.is_cooling("jd") is False)
+    check("无记录时 record_success 返回 False（不白写盘）",
+          breaker.record_success("xianyu") is False)
+
+    breaker.clear()
+    breaker.trip("jd", reason="访问频繁")
+    check("清零后再次熔断回到阶梯第 1 级（30 分钟）",
+          breaker.cooldown_remaining("jd") <= 1800
+          and breaker.consecutive_trips("jd") == 1)
+    breaker.clear()
+
+    # ---- 阶梯可被环境变量覆盖（排障时压到秒级做演练）----
+    with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_LADDER": "5,10,20"}):
+        check("DIYPRICE_BREAKER_LADDER 覆盖生效",
+              breaker.backoff_ladder() == (5.0, 10.0, 20.0)
+              and breaker.backoff_for(3) == 20.0
+              and breaker.backoff_for(7) == 20.0)
+    with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_LADDER": "abc"}):
+        check("阶梯环境变量非法时回落默认（不让采集崩）",
+              breaker.backoff_ladder() == (1800.0, 7200.0, 21600.0, 86400.0))
+
+    # ---- snapshot / active_summary 要带上"连续第几次" ----
+    breaker.clear()
+    breaker.trip("jd", reason="访问频繁")
+    snap = breaker.snapshot()["jd"]
+    check("snapshot 带连续次数与人类可读时长",
+          snap["trips"] == 1 and bool(snap["remaining_text"]) and bool(snap["cooldown_text"]))
+    check("active_summary 写明连续第几次（否则看起来像 bug）",
+          "连续第 1 次" in breaker.active_summary())
+    breaker.clear()
+
+    # ---- 文件损坏时不能把采集全停掉 ----
+    breaker.BREAKER_FILE.write_text("{ 这不是合法 JSON", encoding="utf-8")
+    check("状态文件损坏时当成无冷却（不让采集停摆）",
+          breaker.cooldown_remaining("jd") == 0.0)
+
+    # ---- 开关 ----
+    with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_DISABLE": "1"}):
+        breaker.trip("jd", 60, "开关测试")
+        check("DIYPRICE_BREAKER_DISABLE=1 时冷却被忽略",
+              breaker.cooldown_remaining("jd") == 0.0
+              and breaker.wait_until_ready("jd")[0] is True)
+
+
+def test_zero_yield_reason() -> None:
+    """0 条入库的原因文案，不能把"数据质量问题"说成"限流"。
+
+    实测踩过：搜「RTX 5090 D 32G」返回 30 条报价，全部因离群被剔除，
+    旧文案记成"疑似被限流" —— 会把排查方向从"匹配规则/基准价"
+    带偏到"风控"，白查一轮。
+    """
+    from app.services.pipeline import zero_yield_reason
+
+    nothing = zero_yield_reason(0, 0, 0)
+    check("解析出 0 条 → 指向限流/结构变化",
+          "限流" in nothing and "数据质量" not in nothing)
+
+    rejected = zero_yield_reason(0, 4, 26)
+    check("解析出 30 条但全被剔除 → 判为数据质量问题，不冤枉平台",
+          "数据质量" in rejected and "非限流" in rejected, f"实际：{rejected}")
+    check("文案带上具体条数（便于直接定位）",
+          "30 条" in rejected and "未匹配 4" in rejected and "被过滤 26" in rejected)
+    check("只有未匹配 / 只有被过滤，都算数据质量问题",
+          "数据质量" in zero_yield_reason(0, 5, 0)
+          and "数据质量" in zero_yield_reason(0, 0, 5))
+
+
+def test_backoff_reset_rule() -> None:
+    """成功重置的三个条件：采到数据 + 没熔断中止 + 不是空结果推断的限流。
+
+    这条规则一旦被改宽（`if quotes:` 这种图省事的写法），退避阶梯就白设了 ——
+    一次侥幸的少量结果会把连续计数清零，下一轮又立刻撞墙。
+    """
+    from app.collectors.base import should_reset_backoff
+
+    check("正常采到数据且无限流 → 允许清零", should_reset_backoff(30, False, False))
+    check("本轮 0 条 → 不清零", not should_reset_backoff(0, False, False))
+    check("命中限流特征被熔断中止 → 不清零", not should_reset_backoff(30, True, False))
+    check("连续空结果推断为限流 → 不清零", not should_reset_backoff(30, False, True))
+    check("三种不合格条件同时成立也不清零",
+          not should_reset_backoff(0, True, True))
+    check("计数为 None/负数也不误判为成功",
+          not should_reset_backoff(None, False, False)  # type: ignore[arg-type]
+          and not should_reset_backoff(-1, False, False))
+
+
+def test_error_severity() -> None:
+    """错误分级：硬拦截 vs 软风控。
+
+    **匹配顺序是这条的命门**：京东的拦截页文案同时含硬词（访问频繁）和
+    软词（请稍后再试）。若先判软，这条真·硬拦截会被误降级成 15 分钟上限，
+    等于放它反复撞 —— 顺序反了就是 bug。
+    """
+    from app.services import breaker
+
+    check("访问频繁 → 硬拦截", breaker.classify("访问频繁") == "hard")
+    check("系统繁忙 → 软风控", breaker.classify("系统繁忙") == "soft")
+    check("error_code=40001 / HTTP 429 → 软风控",
+          breaker.classify("error_code=40001") == "soft"
+          and breaker.classify("HTTP 429") == "soft")
+    check("滑动验证 / punish / 非法访问 → 硬拦截",
+          breaker.classify("滑动验证") == "hard"
+          and breaker.classify("punish") == "hard"
+          and breaker.classify("非法访问") == "hard")
+    jd_text = "抱歉由于访问频繁导致无法搜索，请稍后再试！"
+    check("京东真实文案（硬词+软词并存）必须判硬拦截 —— 先硬后软",
+          breaker.classify(jd_text) == "hard", f"实际 {breaker.classify(jd_text)}")
+    check("未知原因 / 空原因按硬拦截处理（宁多等，不乱撞）",
+          breaker.classify("某个没见过的原因") == "hard" and breaker.classify("") == "hard")
+
+
+def test_soft_cap() -> None:
+    """软风控退避封顶：平台自己忙，不该让我们几小时不采。"""
+    from app.services import breaker
+
+    ladder = breaker.backoff_ladder()
+    check("硬拦截不受软上限影响（仍走完整阶梯）",
+          breaker.backoff_for(1) == ladder[0] and breaker.backoff_for(4) == ladder[-1])
+    check("软风控各级全部封顶在 soft_cap()",
+          all(breaker.backoff_for(n, "soft") == breaker.soft_cap() for n in (1, 2, 3, 4, 9)),
+          f"cap={breaker.soft_cap()}")
+    check("默认软上限 15 分钟", breaker.soft_cap() == 900.0)
+    check("软上限短于定时轮次间隔（60 分钟）→ 软风控不会跳过任何一轮",
+          breaker.soft_cap() < 3600)
+    with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_SOFT_CAP": "120"}):
+        check("DIYPRICE_BREAKER_SOFT_CAP 可覆盖",
+              breaker.soft_cap() == 120.0 and breaker.backoff_for(3, "soft") == 120.0)
+
+
+def test_soft_trip_end_to_end() -> None:
+    """软风控 trip 一次，冷却必须落在软上限内（而不是阶梯的 30 分钟）。"""
+    from app.services import breaker
+
+    tmp = Path(tempfile.mkdtemp(prefix="diyprice_softcap_"))
+    original = breaker.BREAKER_FILE
+    breaker.BREAKER_FILE = tmp / "breaker.json"
+    try:
+        breaker.clear()
+        breaker.trip("pdd", reason="系统繁忙")
+        entry = breaker.entry_of("pdd")
+        check("软风控 trip 后冷却 = 软上限（15 分钟），不是阶梯第 1 级",
+              880 < breaker.cooldown_remaining("pdd") <= 900,
+              f"{entry['cooldown_text']}")
+        check("记录里带 severity=soft", entry.get("severity") == "soft")
+        check("snapshot 也带 severity", breaker.snapshot()["pdd"]["severity"] == "soft")
+
+        breaker.clear()
+        breaker.trip("jd", reason="访问频繁")
+        check("硬拦截 trip 后仍是完整阶梯第 1 级（30 分钟）",
+              1780 < breaker.cooldown_remaining("jd") <= 1800)
+        check("记录里带 severity=hard", breaker.entry_of("jd").get("severity") == "hard")
+    finally:
+        breaker.BREAKER_FILE = original
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_record_success_verified() -> None:
+    """探针专用豁免：verified=True 允许在冷却期内清零；调度路径不许。"""
+    from app.services import breaker
+
+    tmp = Path(tempfile.mkdtemp(prefix="diyprice_verified_"))
+    original = breaker.BREAKER_FILE
+    breaker.BREAKER_FILE = tmp / "breaker.json"
+    try:
+        breaker.clear()
+        breaker.trip("jd", reason="访问频繁")
+        check("调度路径：冷却期内 record_success 被拒绝（默认 verified=False）",
+              breaker.record_success("jd") is False
+              and breaker.consecutive_trips("jd") == 1)
+        check("探针路径：verified=True 可提前结束冷却",
+              breaker.record_success("jd", verified=True) is True)
+        check("清零后不再冷却且连续计数归零",
+              not breaker.is_cooling("jd") and breaker.consecutive_trips("jd") == 0)
+        check("无记录时 verified=True 也不白写盘",
+              breaker.record_success("pdd", verified=True) is False)
+    finally:
+        breaker.BREAKER_FILE = original
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_probe_gates() -> None:
+    """探针的两道闸 + **失败不放大阶梯**。
+
+    全程用假采集器 + 假浏览器，**不发任何真实请求**。
+    """
+    from app.collectors import policy
+    from app.services import breaker, probe
+
+    tmp = Path(tempfile.mkdtemp(prefix="diyprice_probe_"))
+    b_orig, p_orig = breaker.BREAKER_FILE, probe.PROBE_STATE_FILE
+    breaker.BREAKER_FILE = tmp / "breaker.json"
+    probe.PROBE_STATE_FILE = tmp / "probe.json"
+    try:
+        breaker.clear()
+        probe.reset_rate_limit()
+
+        out = probe.probe("jd")
+        check("闸 1：未处于退避期 → 跳过且不发请求",
+              bool(out.skipped) and out.quotes == 0, out.skipped)
+
+        breaker.trip("jd", reason="访问频繁")
+        before = breaker.consecutive_trips("jd")
+
+        class _FakeCollector:
+            code, name, browser_site = "jd", "京东", "jd"
+
+            def _search(self, page, product):
+                raise policy.RateLimitError("jd", "访问频繁")
+
+        class _FakePage:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, *exc):
+                return False
+
+        class _FakeWorker:
+            def page(self, **kw):
+                return _FakePage()
+
+            def stop(self):
+                return {}
+
+        class _FakeProduct:
+            id, model, is_active = 1, "RTX 5070", True
+
+        patches = [
+            mock.patch("app.collectors.get_collectors", return_value=[_FakeCollector()]),
+            mock.patch("app.services.browser_worker.get_worker", return_value=_FakeWorker()),
+            mock.patch.object(probe, "_pick_canary", return_value=_FakeProduct()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            failed = probe.probe("jd", force=True)
+        finally:
+            for p in patches:
+                p.stop()
+
+        check("探活失败（仍被限流）→ ok=False 且给出原因",
+              failed.ok is False and "仍被限流" in failed.reason, failed.reason)
+        check("**探针失败不放大阶梯**（连续次数不变）",
+              breaker.consecutive_trips("jd") == before,
+              f"{before} → {breaker.consecutive_trips('jd')}")
+
+        out2 = probe.probe("jd")
+        check("闸 2：刚探测过 → 被最小间隔挡住", "未到最小间隔" in out2.skipped, out2.skipped)
+
+        class _OkCollector(_FakeCollector):
+            def _search(self, page, product):
+                return [object()] * 3
+
+        patches = [
+            mock.patch("app.collectors.get_collectors", return_value=[_OkCollector()]),
+            mock.patch("app.services.browser_worker.get_worker", return_value=_FakeWorker()),
+            mock.patch.object(probe, "_pick_canary", return_value=_FakeProduct()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            recovered = probe.probe("jd", force=True)
+        finally:
+            for p in patches:
+                p.stop()
+
+        check("探活成功 → 清掉退避、恢复调度",
+              recovered.ok is True and recovered.recovered is True
+              and not breaker.is_cooling("jd"))
+        check("探活成功也把连续计数清零", breaker.consecutive_trips("jd") == 0)
+        check("探针限频默认 10 分钟（低于此值等于高频撞墙）",
+              probe.min_interval() == 600.0)
+    finally:
+        breaker.BREAKER_FILE, probe.PROBE_STATE_FILE = b_orig, p_orig
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_db_pragmas() -> None:
+    """SQLite 并发配置：PRAGMA 是**连接级**的，必须每条新连接都带上。"""
+    from app.db import busy_timeout_ms, connection_pragmas, engine
+
+    p = connection_pragmas()
+    check("journal_mode = wal（读写互不阻塞）", str(p["journal_mode"]).lower() == "wal", str(p))
+    check("busy_timeout 已设置且 ≥ 1000ms（拿不到锁会等，不会立刻抛）",
+          p["busy_timeout"] == busy_timeout_ms() and p["busy_timeout"] >= 1000,
+          f"{p['busy_timeout']}ms")
+    check("synchronous = NORMAL(1)", p["synchronous"] == 1)
+    check("foreign_keys 仍开启（没被新配置挤掉）", p["foreign_keys"] == 1)
+    with engine.connect() as c1, engine.connect() as c2:
+        check("池内多条连接都带上 busy_timeout（漏挂事件就会退化）",
+              c1.exec_driver_sql("PRAGMA busy_timeout").scalar() == busy_timeout_ms()
+              and c2.exec_driver_sql("PRAGMA busy_timeout").scalar() == busy_timeout_ms())
+
+
+def test_stale_log_threshold() -> None:
+    """采集日志的"未收尾"判定阈值 —— 太小会误杀正在跑的轮次。
+
+    拆分事务后，`_open_crawl_log()` 会立刻提交一条 running（管理页要能看到
+    "进行中"），代价是进程被强杀时会留下永远"进行中"的记录，靠
+    `reap_stale_crawl_logs()` 在下一轮收尾。阈值必须**大于看门狗**，
+    否则会把正常在跑的轮次误判成异常中断。
+    """
+    from app.services.pipeline import _STALE_RUNNING_MINUTES
+
+    watchdog_minutes = 30          # scripts/collect_scheduled.sh 的 MAX_COLLECT_SECONDS
+    check("收尾阈值 > 采集看门狗（否则误杀正在跑的轮次）",
+          _STALE_RUNNING_MINUTES > watchdog_minutes, f"{_STALE_RUNNING_MINUTES} 分钟")
+    check("收尾阈值 > 正常一轮耗时的数倍（正常 9~10 分钟）",
+          _STALE_RUNNING_MINUTES >= 30, f"{_STALE_RUNNING_MINUTES} 分钟")
+
+
+# ====================================================================== 主流程
+
+def main() -> int:
+    tests = (
+        test_ranking_direction,
+        test_ranking_empty,
+        test_request_slimming,
+        test_policy_delays,
+        test_rate_limit_detection,
+        test_breaker,
+        test_backoff_reset_rule,
+        test_error_severity,
+        test_soft_cap,
+        test_soft_trip_end_to_end,
+        test_record_success_verified,
+        test_probe_gates,
+        test_db_pragmas,
+        test_stale_log_threshold,
+        test_zero_yield_reason,
+    )
+    for fn in tests:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            # 单个用例崩掉不该掩盖其余断言 —— 否则无法一次看清所有回归点
+            FAILED.append(f"{fn.__name__} 抛异常：{type(exc).__name__}: {exc}")
+
+    for name in PASSED:
+        print(f"  ✅ {name}")
+    for name in FAILED:
+        print(f"  ❌ {name}")
+    print()
+    print(f"通过 {len(PASSED)} / 共 {len(PASSED) + len(FAILED)}")
+    return 1 if FAILED else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

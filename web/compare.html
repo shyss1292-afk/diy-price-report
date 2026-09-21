@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>多型号对比 · DIY 配件价格追踪</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">多型号对比</h1>
+        <div class="page-desc" id="pageDesc">选择 2~6 个型号，比较价格走势与相对强弱</div>
+      </div>
+      <div class="toolbar">
+        <select class="select" id="daysSelect">
+          <option value="30">近 30 天</option>
+          <option value="90" selected>近 90 天</option>
+          <option value="180">近 180 天</option>
+        </select>
+        <select class="select" id="modeSelect">
+          <option value="index" selected>归一化对比（首日=100）</option>
+          <option value="abs">绝对价格对比</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-body">
+        <div class="toolbar" style="margin-bottom:12px">
+          <div style="position:relative">
+            <input class="input" id="addInput" placeholder="搜索并添加型号…" style="width:260px" autocomplete="off">
+            <div id="suggest" class="panel" style="display:none;position:absolute;top:36px;left:0;width:340px;max-height:300px;overflow-y:auto;z-index:20;box-shadow:0 6px 20px rgba(16,24,40,.1)"></div>
+          </div>
+          <button class="btn" id="btnClear">清空</button>
+        </div>
+        <div class="chips" id="selectedChips"></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><div class="panel-title">价格走势对比</div><span class="muted" id="chartHint">—</span></div>
+      <div class="panel-body"><div class="chart chart-lg" id="chartCompare"></div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><div class="panel-title">对比明细</div><span class="muted">数据截至最新采集日</span></div>
+      <div style="overflow-x:auto">
+        <table class="data">
+          <thead>
+            <tr>
+              <th class="model-cell">型号</th><th>品类</th>
+              <th class="num">最新最低价</th><th class="num">区间起点</th>
+              <th class="num">区间涨跌</th><th class="num">当前分位</th>
+              <th style="text-align:center">走势</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"><tr><td colspan="7" class="loading">请先选择型号</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script defer src="/static/js/vendor/echarts.min.js"></script>
+<script defer src="/static/js/common.js"></script>
+<script defer src="/static/js/compare.js"></script>
+</body>
+</html>

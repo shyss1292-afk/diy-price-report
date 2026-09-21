@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>总览看板 · DIY 配件价格追踪</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">总览看板</h1>
+        <div class="page-desc" id="pageDesc">正在加载市场数据…</div>
+      </div>
+      <div class="toolbar">
+        <select class="select" id="periodSelect">
+          <option value="1">日涨跌</option>
+          <option value="7" selected>7 日涨跌</option>
+          <option value="30">30 日涨跌</option>
+        </select>
+        <a class="btn" href="/products">查看全部型号</a>
+      </div>
+    </div>
+
+    <div class="grid grid-4" style="margin-bottom:14px">
+      <div class="panel kpi">
+        <div class="kpi-label">追踪型号</div>
+        <div class="kpi-value" id="kpiTracked">—</div>
+        <div class="kpi-foot" id="kpiTrackedFoot">全品类覆盖</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">本期上涨</div>
+        <div class="kpi-value up" id="kpiUp">—</div>
+        <div class="kpi-foot" id="kpiUpFoot">较上一周期</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">本期下跌</div>
+        <div class="kpi-value down" id="kpiDown">—</div>
+        <div class="kpi-foot" id="kpiDownFoot">较上一周期</div>
+      </div>
+      <div class="panel kpi">
+        <div class="kpi-label">最新数据日期</div>
+        <div class="kpi-value" id="kpiDate" style="font-size:19px">—</div>
+        <div class="kpi-foot" id="kpiDateFoot">每日 02:00 自动采集</div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">真实采集覆盖</div>
+        <span class="muted" id="covHint">—</span>
+      </div>
+      <div class="panel-body" id="covBody">
+        <div class="loading">加载中…</div>
+      </div>
+    </div>
+
+    <div class="grid grid-2" style="margin-bottom:14px">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">涨幅榜</div>
+          <span class="muted" id="upHint">—</span>
+        </div>
+        <div class="rank-list" id="rankUp"><div class="loading">加载中…</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">跌幅榜</div>
+          <span class="muted" id="downHint">—</span>
+        </div>
+        <div class="rank-list" id="rankDown"><div class="loading">加载中…</div></div>
+      </div>
+    </div>
+
+    <div class="grid grid-2" style="margin-bottom:14px">
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">新品市场走势</div><span class="muted">全新平台最低价指数</span></div>
+        <div class="panel-body"><div class="chart chart-md" id="chartIndex"></div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">品类涨跌分布</div><span class="muted">按型号数量统计</span></div>
+        <div class="panel-body"><div class="chart chart-md" id="chartCategory"></div></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">重点关注型号</div>
+        <span class="muted">按板块分组展示，每板块取当前价格最高的几款</span>
+      </div>
+      <div class="panel-body" id="cardSections">
+        <div class="loading">加载中…</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- defer：ECharts 有 1MB，同步加载会阻塞首屏解析 -->
+<script src="/static/js/vendor/echarts.min.js" defer></script>
+<script src="/static/js/common.js" defer></script>
+<script src="/static/js/index.js" defer></script>
+</body>
+</html>
