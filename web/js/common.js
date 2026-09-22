@@ -1,21 +1,26 @@
 /* 公共工具：请求封装、格式化、迷你走势图、侧边栏、提示 */
 
+// 图表配色：**必须与 css/app.css 的 :root 变量保持一致**。
+// 两处不同步的话，卡片是蓝白、图表是另一套色，整体会显得"拼"。
+// 改动任一侧时记得同步另一侧。
 const COLORS = {
-  up: '#d93025',
-  down: '#0f9d58',
-  flat: '#8a9099',
-  accent: '#2f6fed',
-  text: '#16191d',
-  text2: '#5c626d',
-  text3: '#9aa1ac',
-  border: '#e5e7eb',
+  up: '#e0393e',
+  down: '#0d9e6a',
+  flat: '#8c99b0',
+  accent: '#2563eb',
+  text: '#0f1b2d',
+  text2: '#56658a',
+  text3: '#93a1bb',
+  border: '#e6ecf6',
   panel: '#ffffff',
-  grid: '#eef0f3',
+  grid: '#eef3fb',
 };
 
+// 多序列折线用。以蓝为主、整体降饱和，避免一屏十几条高饱和线打架。
+// 顺序有讲究：前三位是"主蓝 / 涨红 / 跌绿"，最常出现的序列优先拿到主色。
 const SERIES_COLORS = [
-  '#2f6fed', '#d93025', '#0f9d58', '#a4700d', '#7c4dff',
-  '#0f8fa8', '#c2185b', '#5f6470',
+  '#2563eb', '#e0393e', '#0d9e6a', '#7c6cf0', '#0e9bb5', '#e08a1e',
+  '#5b7bb5', '#c0559b', '#3d9a8b', '#8a7a5c', '#6b7fa8', '#a05a4a',
 ];
 
 const NAV = [

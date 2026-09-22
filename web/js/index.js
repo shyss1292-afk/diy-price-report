@@ -346,7 +346,9 @@ function renderIndexChart(payload) {
     showSymbol: false,
     smooth: true,
     data: s.data,
-    lineStyle: { width: 1.8 },
+    // 一屏十几条线时 1.8px 会糊成一片，1.5px + 轻微透明更透气；
+    // 鼠标悬停时 ECharts 会把其余序列压暗（emphasis.focus），所以细一点也不影响读数
+    lineStyle: { width: 1.5, opacity: .92 },
     itemStyle: { color: SERIES_COLORS[i % SERIES_COLORS.length] },
     emphasis: { focus: 'series' },
   }));
