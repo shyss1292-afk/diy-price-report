@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from ..models import Listing, Platform, PriceDaily
+from ..models import Listing, Platform, PriceDaily, Product
 
 _BATCH = 800
 
@@ -21,7 +21,7 @@ def refresh_daily(session: Session, since: date | None = None) -> int:
     Returns:
         写入的聚合行数。
 
-    两条硬过滤（2026-09-23 补）
+    三条硬过滤（2026-09-23 补）
     ---------------------------
     `price_daily` 是**行情计算的底座**，脏数据一旦进来，上层所有指标
     （最低价 / 均线 / 涨跌幅 / 分位数）全被污染，而且事后无法分辨
@@ -29,13 +29,17 @@ def refresh_daily(session: Session, since: date | None = None) -> int:
 
       · `is_synthetic == 0` —— 模拟/占位报价不参与任何行情计算。
         它们只是为了让界面在数据空窗期不至于全空，混进统计会把
-        "真实市场最低价"整体拉偏。
+        "真实市场最低价"整体拉偏。实测旧表 87883 行里，
+        按真实明细只算得出 701 行 —— **98% 是模拟数据的聚合**。
       · `Platform.is_active` —— 只统计当前激活平台。停用平台
         （zol / pconline）是媒体参考价，口径与电商成交价不同，
         且早已不再采集；留着只会让历史序列前后不可比。
+      · `Product.is_active` —— 只统计**在监控范围内**的型号。
+        2026-09-23 起监控收窄到三大件（显卡/CPU/内存），
+        长尾品类（主板/固态/电源/散热/机箱）样本稀疏到没有统计意义。
 
-    ⚠️ 加过滤后必须**全量重算**（`since=None`）—— 否则被排除平台/合成记录
-       的旧聚合行会残留在表里，等于没清。
+    ⚠️ 加过滤后必须**全量重算**（`since=None`）—— 否则被排除记录的
+       旧聚合行会残留在表里，等于没清。
     """
     agg_stmt = (
         select(
@@ -48,9 +52,11 @@ def refresh_daily(session: Session, since: date | None = None) -> int:
             func.count(Listing.id),
         )
         .join(Platform, Platform.id == Listing.platform_id)
+        .join(Product, Product.id == Listing.product_id)
         .where(
             Listing.is_synthetic.is_(False),
             Platform.is_active.is_(True),
+            Product.is_active.is_(True),
         )
         .group_by(Listing.product_id, Listing.platform_id, Listing.trade_date)
     )

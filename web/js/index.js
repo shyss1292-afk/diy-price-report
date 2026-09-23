@@ -12,10 +12,12 @@ const BASIS_LABEL = { all: '全市场最低价', new: '全新最低价', used: '
 const CARDS_PER_GROUP = 6;
 // 每个板块取回多少候选（供组内按品类轮流挑，所以要留足余量）
 const CANDIDATES_PER_GROUP = 40;
-// 兜底分组：万一 /api/meta 没返回（或接口变动），也不至于整块空着
+// 兜底分组：万一 /api/meta 没返回（或接口变动），也不至于整块空着。
+// ⚠️ 必须与后端 CATEGORY_GROUPS 保持一致。2026-09-23 监控收窄到三大件，
+//    后端的 other 分组被删，这里的副本也要同步 —— 不过真正防呆的是下面
+//    「按 meta 动态拉取」，硬编码只会在这里兜底，不会再造成 400。
 const FALLBACK_GROUPS = [
   { code: 'core', label: '核心配件', hint: '显卡 / CPU / 内存', categories: ['gpu', 'cpu', 'ram'] },
-  { code: 'other', label: '其他硬件', hint: '主板 / 固态 / 电源 / 散热 / 机箱', categories: ['mb', 'ssd', 'psu', 'cooler', 'case'] },
 ];
 
 async function loadAll() {
@@ -23,17 +25,25 @@ async function loadAll() {
   try {
     // limit：首页每板块只渲染几款，没必要把 300+ 型号（100KB+）全拉回来
     const common = `days=180&period=${period}&basis=${basis}`;
-    const [meta, overview, marketIndex, core, other, coverage] = await Promise.all([
-      api('/api/meta'),
+
+    // 分两轮：先拿 meta 知道**有哪些分组**，再按分组拉数据。
+    //
+    // 为什么不能像原来那样把 group=core / group=other 写死在第一批里：
+    // 分组是**后端可变的**（2026-09-23 砍掉 other 分组时，写死的那次请求
+    // 直接 400，控制台报错、首页少一块）。分组列表只有一个来源 ——
+    // /api/meta —— 请求也必须从它派生。
+    const meta = await api('/api/meta');
+    const groups = (meta && meta.groups && meta.groups.length) ? meta.groups : FALLBACK_GROUPS;
+
+    const [overview, marketIndex, coverage, ...groupRes] = await Promise.all([
       api(`/api/overview?${common}`),
       api('/api/market-index?days=180'),
-      api(`/api/products?${common}&group=core&limit=${CANDIDATES_PER_GROUP}`),
-      api(`/api/products?${common}&group=other&limit=${CANDIDATES_PER_GROUP}`),
       // 覆盖面与涨跌周期无关，跟着一起拉；服务端按数据版本缓存，热态约 10ms
       api('/api/coverage'),
+      ...groups.map((g) =>
+        api(`/api/products?${common}&group=${g.code}&limit=${CANDIDATES_PER_GROUP}`)),
     ]);
-    const groups = (meta && meta.groups && meta.groups.length) ? meta.groups : FALLBACK_GROUPS;
-    const picks = { core: core.items, other: other.items };
+    const picks = Object.fromEntries(groups.map((g, i) => [g.code, groupRes[i].items]));
 
     renderCoverage(coverage, { force: true });
     renderKpi(overview);

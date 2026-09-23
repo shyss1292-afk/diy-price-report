@@ -194,7 +194,10 @@ log "轮转采集：jd/pdd/xianyu（仅显卡+CPU · 闲鱼配额 15）"
 #     浏览器用 start_new_session=False 继承该组，node 驱动同理
 #   · 于是 `kill -- -PGID` 一次覆盖全树
 MAX_COLLECT_SECONDS=1800
-DIYPRICE_FOCUS_CATEGORY=gpu,cpu \
+# 监控范围：三大件（显卡 / CPU / 内存）—— 2026-09-23 决策
+# ⚠️ 加 ram 会把单轮型号数从 130 提到 169，单轮耗时相应上升约 30%。
+#    取舍：内存是三大件之一，不采就永远是空表；代价是显卡/CPU 的刷新变慢。
+DIYPRICE_FOCUS_CATEGORY=gpu,cpu,ram \
 DIYPRICE_XIANYU_LIMIT=15 \
   "$PYTHON_BIN" -m app.cli collect --sources jd,pdd,xianyu >> "$LOG" 2>&1 &
 COLLECT_PID=$!

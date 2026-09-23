@@ -19,7 +19,17 @@ CATEGORIES: dict[str, str] = {
     "case": "机箱",
 }
 
-CATEGORY_ORDER = ["gpu", "cpu", "ram", "mb", "ssd", "psu", "cooler", "case"]
+# 监控范围：**只保留三大件**（2026-09-23 决策）
+#
+# 为什么砍：长尾品类（主板/固态/电源/散热/机箱）的样本极稀疏 ——
+# 单个型号一天常常只有 1~3 条报价，算出来的"最低价"和"涨跌幅"没有统计意义
+# （实测 990 EVO 1TB：1 条 ¥350 vs 2 条 ¥835 = +139% 的假暴涨）。
+# 与其展示一堆不可信的数字，不如把采集配额集中到三大件上，
+# 让每个型号每天都能攒够样本。
+#
+# ⚠️ CATEGORIES 标签表**不要删** —— 历史数据（listings / price_daily）
+#    里还有这些品类的记录，标签查不到会退化成裸 code 显示。
+CATEGORY_ORDER = ["gpu", "cpu", "ram"]
 
 # 页面板块分组：把「核心三大件」和其他硬件分开排，避免混在一起。
 # 这是**展示层**的分组 —— 采集、统计、存储一律仍按 CATEGORY_ORDER 处理。
@@ -29,12 +39,6 @@ CATEGORY_GROUPS: list[dict] = [
         "label": "核心配件",
         "hint": "显卡 / CPU / 内存",
         "categories": ["gpu", "cpu", "ram"],
-    },
-    {
-        "code": "other",
-        "label": "其他硬件",
-        "hint": "主板 / 固态 / 电源 / 散热 / 机箱",
-        "categories": ["mb", "ssd", "psu", "cooler", "case"],
     },
 ]
 
