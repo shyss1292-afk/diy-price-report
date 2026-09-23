@@ -1153,6 +1153,56 @@ def test_sleep_resistance_and_lock() -> None:
           "cleanup()" in script and "trap cleanup EXIT" in script)
 
 
+def test_browser_launch_defense() -> None:
+    """浏览器启动前防御：清残留 Singleton 锁 + 回收占端口的僵尸。
+
+    2026-09-23 16:00 那轮三源全部失败，日志只有
+    `connect ECONNREFUSED 127.0.0.1:9222` + `浏览器启动失败` ——
+    浏览器**两次重建都没起来**，整轮白跑 4 分 49 秒。
+    成因是上一轮回收时留下的 `SingletonLock` 指向已不存在的 PID，
+    Chrome 启动时看到它**部分版本会直接退出**（不同版本行为不一致）。
+
+    ⚠️ 两个函数各有一道**安全闸**，这是它们的核心价值：
+       · `_clear_stale_singleton` 只在**没有活跃进程**时才清 ——
+         否则会删掉正在运行实例的锁，两个 Chrome 争同一个 profile
+       · `_reap_port_holders` 只杀**看起来是浏览器**的进程 ——
+         端口号可能被别的服务碰巧占用，见谁杀谁会误伤
+    """
+    import inspect
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from app.services import session as S
+
+    src = inspect.getsource(S.launch_browser)
+    check("启动前清残留锁", "_clear_stale_singleton(BROWSER_PROFILE)" in src)
+    check("启动前回收端口僵尸", "_reap_port_holders(CDP_PORT)" in src)
+
+    cs = inspect.getsource(S._clear_stale_singleton)
+    check("有活跃进程时绝不动锁（安全闸一）", "if profile_pids(profile):" in cs)
+    check("软链要单独判（SingletonLock 指向不存在的目标时 exists() 为 False）",
+          "p.is_symlink() or p.exists()" in cs)
+
+    rp = inspect.getsource(S._reap_port_holders)
+    check("只杀看起来是浏览器的进程（安全闸二）", "_looks_like_browser(cmdline)" in rp)
+    check("不杀自己", "if pid == me:" in rp)
+    check("lsof 拿不到就跳过，不挡住启动", "except (OSError, subprocess.SubprocessError):" in rp)
+
+    # 行为验证：三个锁（含悬空软链）必须全清掉
+    with tempfile.TemporaryDirectory() as td:
+        prof = Path(td)
+        (prof / "SingletonSocket").write_text("x")
+        (prof / "SingletonCookie").write_text("y")
+        os.symlink("/nonexistent-host-99999", prof / "SingletonLock")
+        removed = S._clear_stale_singleton(prof)
+        check("三个残留锁全部清掉（含悬空软链）", len(removed) == 3,
+              f"实际清了 {sorted(removed)}")
+        check("清理后目录为空", not list(prof.iterdir()))
+
+    check("空闲端口返回空列表（不误报）", S._reap_port_holders(9222) == [])
+
+
 def test_scope_gpu_cpu_only() -> None:
     """监控范围 = GPU + CPU 双核心（2026-09-23 最终裁决）。
 
@@ -1423,6 +1473,7 @@ def main() -> int:
         test_latest_quote_fallback,
         test_market_hygiene,
         test_scope_gpu_cpu_only,
+        test_browser_launch_defense,
         test_watchdog_group_broadcast,
         test_anti_popup_config,
         test_request_slimming_rules,

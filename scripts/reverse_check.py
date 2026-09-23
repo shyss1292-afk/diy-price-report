@@ -191,6 +191,18 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "        return candidates[0]",
     ),
     (
+        "清残留锁时不检查活跃进程（会删掉正在运行实例的锁）",
+        SESSION,
+        "    if profile_pids(profile):\n        return []          # 有活跃进程，锁是有效的，绝不能碰",
+        "    pass",
+    ),
+    (
+        "端口回收不检查是不是浏览器（见谁杀谁，会误伤别的服务）",
+        SESSION,
+        "        if not _looks_like_browser(cmdline):",
+        "        if False:",
+    ),
+    (
         "监控范围偷偷加回 ram（单轮耗时逼近拼多多风控红线）",
         SEED,
         'CATEGORY_ORDER = ["gpu", "cpu"]',

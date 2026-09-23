@@ -390,6 +390,94 @@ def cdp_usable(timeout_ms: int = 6000) -> bool:
         return False
 
 
+# Chrome 用这三个文件保证「一个 profile 只被一个实例打开」。
+# 主进程**异常退出**（被 SIGKILL / 断电 / 休眠中断 / 回收时没等干净）会留下它们。
+_SINGLETON_FILES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+
+
+def _clear_stale_singleton(profile: Path | str) -> list[str]:
+    """清理**残留**的 Chrome profile 锁，返回被清掉的文件名。
+
+    为什么需要（2026-09-23 16:00 实测）
+    ----------------------------------
+    那一轮三源全部失败，日志是：
+
+        CDP 连接失败，重试中：connect ECONNREFUSED 127.0.0.1:9222
+        借页失败（第 1/2 次）：浏览器启动失败，无法提供页面
+        回收浏览器：借页失败，重建实例
+        借页失败（第 2/2 次）：浏览器启动失败，无法提供页面
+        采集失败 jd: 无法取得可用页面：浏览器启动失败
+
+    **浏览器两次重建都没起来**，CDP 端口始终不监听，整轮白跑 4 分 49 秒。
+
+    成因：上一轮（15:12 结束）的进程被回收时没清干净锁，
+    Chrome 启动看到 `SingletonLock` 指向一个已不存在的 PID。
+    **不同 Chrome 版本对此行为不一致** —— 有的接管、有的直接退出，
+    所以不能指望它自愈，必须在启动前主动清。
+
+    ⚠️ 只在**确认该 profile 没有活跃浏览器进程**时才清。
+       否则会删掉正在运行实例的锁，让两个 Chrome 争同一个 profile ——
+       Chrome 会拒绝启动第二个，但状态会变得很难诊断。
+    """
+    if profile_pids(profile):
+        return []          # 有活跃进程，锁是有效的，绝不能碰
+    removed: list[str] = []
+    for name in _SINGLETON_FILES:
+        p = Path(profile) / name
+        try:
+            # is_symlink 要单独判：SingletonLock 是个**指向 hostname-pid 的软链**，
+            # 目标不存在时 `exists()` 会返回 False，只看 exists() 会漏掉它。
+            if p.is_symlink() or p.exists():
+                p.unlink()
+                removed.append(name)
+        except OSError:
+            pass           # 清不掉不算致命，让后面的启动去撞
+    return removed
+
+
+def _reap_port_holders(port: int) -> list[int]:
+    """回收占着 CDP 端口、但**不响应 CDP** 的残留进程。
+
+    只在调用方已经确认 `cdp_alive()` 为 False 之后调用 ——
+    也就是说这个端口上如果有东西，它已经是个不响应的僵尸了。
+
+    ⚠️ 两道安全闸，缺一不可：
+       1. 只杀**命令行看起来是浏览器**的进程（`_looks_like_browser`）——
+          端口号是可能被别的服务碰巧占用的，不能见谁杀谁
+       2. 不杀本进程自己（理论上不会，但多一道保险）
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []          # 拿不到 lsof 就跳过这一步，别让它挡住启动
+
+    pids = sorted({int(x) for x in out.split() if x.strip().isdigit()})
+    reaped: list[int] = []
+    me = os.getpid()
+    for pid in pids:
+        if pid == me:
+            continue
+        try:
+            cmdline = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if not _looks_like_browser(cmdline):
+            logger.warning("端口 %s 被非浏览器进程 PID %s 占用，不动它", port, pid)
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            reaped.append(pid)
+        except OSError:
+            pass
+    return reaped
+
+
 def launch_browser(wait_seconds: float = 20.0, force: bool = False, park: bool = True) -> bool:
     """确保有一个**可用的**调试浏览器（已启动且健康则直接返回 True）。
 
@@ -415,6 +503,21 @@ def launch_browser(wait_seconds: float = 20.0, force: bool = False, park: bool =
         raise RuntimeError("未找到可用的 Chromium 内核浏览器（Chrome / Edge / Chromium / Brave）")
 
     BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
+
+    # ---- 启动前防御：清残留锁 + 核端口（2026-09-23 补）----
+    #
+    # 这两步是给「上一轮异常退出」擦屁股。不做的话 Chrome 可能**根本起不来**，
+    # 而调用方只会看到一句 `connect ECONNREFUSED`，完全看不出是锁的问题 ——
+    # 16:00 那轮三源全失败就卡在这里，排查花了不少时间。
+    stale = _clear_stale_singleton(BROWSER_PROFILE)
+    if stale:
+        logger.warning("清理了残留的 Chrome profile 锁：%s", "、".join(stale))
+
+    reaped = _reap_port_holders(CDP_PORT)
+    if reaped:
+        logger.warning("回收了占着端口 %s 但不响应 CDP 的残留进程：%s", CDP_PORT, reaped)
+        time.sleep(1.5)
+
     # 启动前记下用户正在用的应用 —— 浏览器一起来就会把它顶掉，
     # 必须显式还回去（见 restore_front_app）。
     prev_app = frontmost_app_name() if park else None
