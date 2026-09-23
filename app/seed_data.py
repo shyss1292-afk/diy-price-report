@@ -29,7 +29,7 @@ CATEGORIES: dict[str, str] = {
 #
 # ⚠️ CATEGORIES 标签表**不要删** —— 历史数据（listings / price_daily）
 #    里还有这些品类的记录，标签查不到会退化成裸 code 显示。
-CATEGORY_ORDER = ["gpu", "cpu", "ram"]
+CATEGORY_ORDER = ["gpu", "cpu"]
 
 # 页面板块分组：把「核心三大件」和其他硬件分开排，避免混在一起。
 # 这是**展示层**的分组 —— 采集、统计、存储一律仍按 CATEGORY_ORDER 处理。
@@ -37,8 +37,8 @@ CATEGORY_GROUPS: list[dict] = [
     {
         "code": "core",
         "label": "核心配件",
-        "hint": "显卡 / CPU / 内存",
-        "categories": ["gpu", "cpu", "ram"],
+        "hint": "显卡 / CPU",
+        "categories": ["gpu", "cpu"],
     },
 ]
 

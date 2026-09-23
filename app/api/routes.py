@@ -92,9 +92,15 @@ def get_coverage(db: Session = Depends(get_db)) -> dict:
 @router.get("/meta")
 def get_meta(db: Session = Depends(get_db)) -> dict:
     platforms = db.execute(select(Platform).order_by(Platform.sort_order)).scalars().all()
+    # ⚠️ 必须过滤 is_active —— 归档品类（主板/固态/散热/电源/机箱/内存）
+    #    仍留在 products 表里（历史数据要能查），但**不算监控范围**。
+    #    不过滤的话界面会显示「全部 351」，而实际只有 130 个型号 ——
+    #    数字和列表对不上，比不显示还糟。
     counts = dict(
         db.execute(
-            select(Product.category, func.count(Product.id)).group_by(Product.category)
+            select(Product.category, func.count(Product.id))
+            .where(Product.is_active.is_(True))
+            .group_by(Product.category)
         ).all()
     )
     categories = [

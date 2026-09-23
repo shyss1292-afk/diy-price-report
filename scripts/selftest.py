@@ -1153,6 +1153,41 @@ def test_sleep_resistance_and_lock() -> None:
           "cleanup()" in script and "trap cleanup EXIT" in script)
 
 
+def test_scope_gpu_cpu_only() -> None:
+    """监控范围 = GPU + CPU 双核心（2026-09-23 最终裁决）。
+
+    内存曾被短暂加入又撤回，理由：
+      · 单轮型号数 130 → 169，耗时 12.2 → ~15.9 分钟，
+        **逼近拼多多 15 分钟软风控红线**
+      · 8G 主力机承受不起每小时 25% 时间跑浏览器
+      · 内存规格碎片化严重（频率/套条/时序），产出比过低
+
+    ⚠️ 标签表 CATEGORIES **不能删** —— 归档品类的历史数据还在库里，
+       标签缺失会让它们退化成裸 code 显示。
+    """
+    import inspect
+    import pathlib as _pl
+
+    from app.api import routes
+    from app.seed_data import CATEGORIES, CATEGORY_GROUPS, CATEGORY_ORDER
+
+    check("监控品类只有 gpu / cpu", CATEGORY_ORDER == ["gpu", "cpu"],
+          f"实际 {CATEGORY_ORDER}")
+    check("只有一个核心分组，且只含 gpu/cpu",
+          len(CATEGORY_GROUPS) == 1 and CATEGORY_GROUPS[0]["categories"] == ["gpu", "cpu"])
+    check("归档品类的标签仍在（历史数据要能显示中文）",
+          all(k in CATEGORIES for k in ("ram", "ssd", "mb", "psu", "cooler", "case")))
+
+    meta = inspect.getsource(routes.get_meta)
+    check("meta 计数过滤 is_active（否则显示 351 而列表只有 130）",
+          "Product.is_active.is_(True)" in meta)
+
+    sched = (_pl.Path(__file__).resolve().parent / "collect_scheduled.sh").read_text(encoding="utf-8")
+    check("采集范围是 gpu,cpu（不含 ram）", "DIYPRICE_FOCUS_CATEGORY=gpu,cpu \\" in sched)
+    check("采集范围注释里写明了为什么不要内存",
+          "逼近拼多多 15 分钟软风控红线" in sched)
+
+
 def test_market_hygiene() -> None:
     """行情底座的三层去污：聚合过滤 / 口径闸门 / 样本量闸门。
 
@@ -1387,6 +1422,7 @@ def main() -> int:
         test_sleep_resistance_and_lock,
         test_latest_quote_fallback,
         test_market_hygiene,
+        test_scope_gpu_cpu_only,
         test_watchdog_group_broadcast,
         test_anti_popup_config,
         test_request_slimming_rules,

@@ -42,6 +42,8 @@ CLEAN = PROJ / "app/services/clean.py"
 NORMALIZE = PROJ / "app/services/normalize.py"
 TREND = PROJ / "app/services/trend.py"
 AGGREGATE = PROJ / "app/services/aggregate.py"
+SEED = PROJ / "app/seed_data.py"
+ROUTES = PROJ / "app/api/routes.py"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
 SCHED = PROJ / "scripts/collect_scheduled.sh"
@@ -189,6 +191,18 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "        return candidates[0]",
     ),
     (
+        "监控范围偷偷加回 ram（单轮耗时逼近拼多多风控红线）",
+        SEED,
+        'CATEGORY_ORDER = ["gpu", "cpu"]',
+        'CATEGORY_ORDER = ["gpu", "cpu", "ram"]',
+    ),
+    (
+        "meta 计数丢掉 is_active 过滤（界面显示 351、列表只有 130）",
+        ROUTES,
+        "            .where(Product.is_active.is_(True))\n            .group_by(Product.category)",
+        "            .group_by(Product.category)",
+    ),
+    (
         "聚合层去掉 is_synthetic 过滤（模拟数据重新污染行情）",
         AGGREGATE,
         "            Listing.is_synthetic.is_(False),\n",
@@ -300,7 +314,7 @@ def main() -> int:
 
     try:
         for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED,
-                 SESSION, WORKER, TREND, AGGREGATE}:
+                 SESSION, WORKER, TREND, AGGREGATE, SEED, ROUTES}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak

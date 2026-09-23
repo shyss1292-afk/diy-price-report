@@ -194,10 +194,16 @@ log "轮转采集：jd/pdd/xianyu（仅显卡+CPU · 闲鱼配额 15）"
 #     浏览器用 start_new_session=False 继承该组，node 驱动同理
 #   · 于是 `kill -- -PGID` 一次覆盖全树
 MAX_COLLECT_SECONDS=1800
-# 监控范围：三大件（显卡 / CPU / 内存）—— 2026-09-23 决策
-# ⚠️ 加 ram 会把单轮型号数从 130 提到 169，单轮耗时相应上升约 30%。
-#    取舍：内存是三大件之一，不采就永远是空表；代价是显卡/CPU 的刷新变慢。
-DIYPRICE_FOCUS_CATEGORY=gpu,cpu,ram \
+# 监控范围：**GPU + CPU 双核心**（2026-09-23 最终裁决）
+#
+# 为什么不要内存（曾短暂加过 ram 又撤回）：
+#   · 加 ram 后单轮型号数 130 → 169，耗时 12.2 → ~15.9 分钟，
+#     **逼近拼多多 15 分钟软风控红线** —— 一旦踩线整轮白跑
+#   · 8G 内存主力机承受不起"每小时有 25% 的时间在跑浏览器"
+#   · 内存规格碎片化严重（频率 / 套条 / 时序 / 颗粒），
+#     同一个"16G DDR5"能拆出几十个 SKU，产出比过低
+# 结论：宁可少而准，不要多而糊。
+DIYPRICE_FOCUS_CATEGORY=gpu,cpu \
 DIYPRICE_XIANYU_LIMIT=15 \
   "$PYTHON_BIN" -m app.cli collect --sources jd,pdd,xianyu >> "$LOG" 2>&1 &
 COLLECT_PID=$!
