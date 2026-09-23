@@ -41,6 +41,7 @@ SEED = PROJ / "app/seed_data.py"
 CLEAN = PROJ / "app/services/clean.py"
 NORMALIZE = PROJ / "app/services/normalize.py"
 TREND = PROJ / "app/services/trend.py"
+AGGREGATE = PROJ / "app/services/aggregate.py"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
 SCHED = PROJ / "scripts/collect_scheduled.sh"
@@ -188,6 +189,30 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "        return candidates[0]",
     ),
     (
+        "聚合层去掉 is_synthetic 过滤（模拟数据重新污染行情）",
+        AGGREGATE,
+        "            Listing.is_synthetic.is_(False),\n",
+        "",
+    ),
+    (
+        "聚合层去掉激活平台过滤（停用平台重新进均线）",
+        AGGREGATE,
+        "            Platform.is_active.is_(True),\n",
+        "",
+    ),
+    (
+        "口径闸门退回「平台数 ≥2」（真实单平台型号全部失去涨跌幅）",
+        TREND,
+        "comparable = same_channels and enough and balanced",
+        "comparable = (bool(sets) and idx < len(sets) and len(sets[idx]) >= 2)",
+    ),
+    (
+        "样本量闸门退回无门槛（单条样本造出假暴涨）",
+        TREND,
+        "            MIN_SAMPLES = 3",
+        "            MIN_SAMPLES = 1",
+    ),
+    (
         "最新报价兜底退回 low[-1]（basis=new/used 下会把有数据的型号误判成空白）",
         TREND,
         "        for i in range(len(low) - 1, -1, -1):\n            if low[i] is not None:\n                idx = i\n                break",
@@ -275,7 +300,7 @@ def main() -> int:
 
     try:
         for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED,
-                 SESSION, WORKER, TREND}:
+                 SESSION, WORKER, TREND, AGGREGATE}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak

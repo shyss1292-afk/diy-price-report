@@ -1153,6 +1153,59 @@ def test_sleep_resistance_and_lock() -> None:
           "cleanup()" in script and "trap cleanup EXIT" in script)
 
 
+def test_market_hygiene() -> None:
+    """行情底座的三层去污：聚合过滤 / 口径闸门 / 样本量闸门。
+
+    2026-09-23 排查「+304% 暴涨」时定位到的三个独立成因，缺一个都会复发：
+
+    1. **聚合层没过滤**（aggregate.py）
+       旧 price_daily 87883 行里，按真实明细只算得出 701 行 ——
+       **98% 的聚合行来自模拟数据**，而且停用平台（zol/pconline）的
+       历史行也留着。上层所有指标都被污染。
+
+    2. **口径闸门**（trend.py）
+       「全市场最低价」是跨平台取 min，**样本一换结论就变**。
+       RTX 5090 在 9/17 有 3 平台（最低 ¥7898 闲鱼二手），9/22 只剩 1 个
+       （¥47777 拼多多全新）→ 直接取差值 = +505%，那是口径换了不是涨价。
+       判据用**平台集合的 Jaccard 重合度 ≥ 0.5**，不是"平台数量 ≥2"
+       （后者会让 123 个型号只剩 2 个有涨跌幅 —— 真实数据里大部分型号
+        每天就只有闲鱼一个平台，那种情况**是可比的**）。
+
+    3. **样本量闸门**
+       单条样本的"最低价"就是那条本身，与几十条里的最低价不可比。
+       i3-12100F：9/22 有 26 条（¥352）→ 9/23 只有 1 条（¥975）= +177% 假暴涨。
+       要求两天各 ≥3 条，且样本量量级相当（≤4 倍）。
+    """
+    import inspect
+    import pathlib as _pl
+
+    from app.services import aggregate, trend
+
+    agg = inspect.getsource(aggregate.refresh_daily)
+    check("聚合层排除模拟记录（is_synthetic）", "is_synthetic.is_(False)" in agg)
+    check("聚合层只统计激活平台（Platform.is_active）", "Platform.is_active.is_(True)" in agg)
+    check("全量重算时整表清空（否则旧脏行留着 = 没清）",
+          "delete(PriceDaily)" in agg and "if since is None" in agg)
+
+    tr = inspect.getsource(trend.build_snapshot)
+    check("口径闸门：平台集合 Jaccard ≥ 0.5", "len(a & b) / len(union) >= 0.5" in tr)
+    check("样本量闸门：两天各 ≥3 条", "MIN_SAMPLES = 3" in tr)
+    check("样本量量级相当（≤4 倍）", "min(a_n, b_n) * 4" in tr)
+    check("不可比时不出涨跌幅（宁可缺不可错）", "if not comparable:" in tr and "pct = None" in tr)
+    # ⚠️ 断言**赋值语句本身**，不能只断言它的组成部分 ——
+    #    变异只替换这一行、保留 Jaccard 那行时，只查组成部分的断言会漏掉
+    #    （实测：这条守卫一度是虚的）。
+    check("三道闸门必须**同时**生效（same_channels + enough + balanced）",
+          "comparable = same_channels and enough and balanced" in tr)
+    check("abs 与 change_pct 同生共死", "comparable and last is not None" in tr)
+
+    cs = inspect.getsource(trend._compute_market_series)
+    check("序列记录每天的平台集合", 'series["platform_ids"]' in cs)
+    check("序列记录每天的样本条数", 'series["sample_counts"]' in cs)
+    check("只回填**前导** None（不能回填中间缺口和末尾 —— 那是错数据）",
+          "for i, v in enumerate(seq):\n                if v is not None:\n                    break" in cs)
+
+
 def test_latest_quote_fallback() -> None:
     """「最新有效报价兜底」：今天没轮巡到的型号，回退展示它最近一次的报价。
 
@@ -1178,8 +1231,11 @@ def test_latest_quote_fallback() -> None:
     check("返回 stale_days（过期天数）", '"stale_days"' in src)
     check("从末尾往前找第一个有值的日期（不是直接取 low[-1]）",
           "for i in range(len(low) - 1, -1, -1)" in src and "low[i] is not None" in src)
+    # ⚠️ 断言要精确到**那一行赋值**。只查子串 `last_date - timedelta(days=period)`
+    #    会被同文件的 `prev_idx = _lookup_idx(...)` 那一行喂饱，
+    #    变异改掉 prev 那行时守卫照样通过（实测踩过）。
     check("涨跌基准跟数据日期走，不是跟今天走",
-          "last_date - timedelta(days=period)" in src)
+          "prev = _lookup(dates, low, last_date - timedelta(days=period))" in src)
     check("全 None 时跳过该型号（不产出空行）", "if idx is None:" in src)
 
     # 前端：徽标函数必须存在且两个页面都在用
@@ -1330,6 +1386,7 @@ def main() -> int:
         test_wall_clock_guard_absolute_time,
         test_sleep_resistance_and_lock,
         test_latest_quote_fallback,
+        test_market_hygiene,
         test_watchdog_group_broadcast,
         test_anti_popup_config,
         test_request_slimming_rules,

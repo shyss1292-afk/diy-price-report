@@ -122,6 +122,18 @@ def _lookup(dates: list[date], values: list[float | None], target: date) -> floa
     return None
 
 
+def _lookup_idx(dates: list[date], target: date) -> int | None:
+    """取 target 当日或之前最近可用值的**下标**。
+
+    与 `_lookup` 配对使用：`_lookup` 取值，这个取下标 ——
+    需要读**同期的其它字段**（如当天的平台覆盖数）时用它对齐。
+    """
+    for i in range(len(dates) - 1, -1, -1):
+        if dates[i] <= target:
+            return i
+    return None
+
+
 def _clean(values: list[float | None]) -> list[float]:
     return [v for v in values if v is not None]
 
@@ -194,10 +206,12 @@ def _compute_market_series(
         select(
             PriceDaily.product_id,
             PriceDaily.trade_date,
+            PriceDaily.platform_id,
             Platform.kind,
-            func.min(PriceDaily.min_price),
-            func.max(PriceDaily.max_price),
-            func.avg(PriceDaily.avg_price),
+            PriceDaily.min_price,
+            PriceDaily.max_price,
+            PriceDaily.avg_price,
+            PriceDaily.sample_count,
         )
         .join(Platform, Platform.id == PriceDaily.platform_id)
         .where(
@@ -206,16 +220,23 @@ def _compute_market_series(
             # 混进来会把"市场行情线"整体抬高。
             Platform.is_active.is_(True),
         )
-        .group_by(PriceDaily.product_id, PriceDaily.trade_date, Platform.kind)
+        # 按 platform_id 逐行取（不再按 kind 预聚合）—— 需要知道每天
+        # **具体是哪几个平台**在报价，这是判断跨日"可不可比"的唯一依据。
+        # 实测 RTX 5090 在 9/17 有 3 个平台（最低 ¥7898，闲鱼二手），
+        # 9/22 只剩 1 个（¥47777，拼多多全新）—— 直接取差值算出 +505%，
+        # 那是**口径换了**，不是涨价。
     )
     if category:
         stmt = stmt.join(Product, Product.id == PriceDaily.product_id).where(
             Product.category == category
         )
 
-    raw: dict[int, dict[date, dict[str, tuple[float, float, float]]]] = {}
-    for pid, d, kind, lo, hi, avg in session.execute(stmt).all():
-        raw.setdefault(pid, {}).setdefault(d, {})[kind] = (float(lo), float(hi), float(avg))
+    # entries 的每项：(platform_id, kind, min_price, max_price, avg_price)
+    raw: dict[int, dict[date, list[tuple[int, str, float, float, float]]]] = {}
+    for pid, d, plid, kind, lo, hi, avg, cnt in session.execute(stmt).all():
+        raw.setdefault(pid, {}).setdefault(d, []).append(
+            (int(plid), kind, float(lo), float(hi), float(avg), int(cnt))
+        )
 
     frame: dict[int, dict] = {}
     for pid, by_date in raw.items():
@@ -223,30 +244,52 @@ def _compute_market_series(
         series: dict = {"dates": dates}
         for key in SERIES_KEYS:
             series[key] = []
+        # 每天**有哪些平台**在报价（与 SERIES_KEYS 对齐的独立字段，不是价格序列）。
+        # 存集合而不是数量 —— 判"可不可比"要看**集合是否重合**：
+        # 「两天都只有闲鱼」可比（同为二手口径），
+        # 「昨天三平台、今天只有拼多多」不可比（口径整个换了）。
+        series["platform_ids"] = []
+        series["sample_counts"] = []
 
         for d in dates:
-            kinds = by_date[d]
-            new = kinds.get("new")
-            used = kinds.get("used")
+            entries = by_date[d]
+            new_vals = [e for e in entries if e[1] == "new"]
+            used_vals = [e for e in entries if e[1] == "used"]
 
-            lows = [t[0] for t in (new, used) if t is not None]
-            highs = [t[1] for t in (new, used) if t is not None]
-            avgs = [t[2] for t in (new, used) if t is not None]
+            series["new_low"].append(min(e[2] for e in new_vals) if new_vals else None)
+            series["used_low"].append(min(e[2] for e in used_vals) if used_vals else None)
+            series["all_low"].append(min(e[2] for e in entries) if entries else None)
+            series["all_high"].append(max(e[3] for e in entries) if entries else None)
+            series["new_avg"].append(
+                sum(e[4] for e in new_vals) / len(new_vals) if new_vals else None
+            )
+            series["all_avg"].append(
+                sum(e[4] for e in entries) / len(entries) if entries else None
+            )
+            series["platform_ids"].append(frozenset(e[0] for e in entries))
+            # 当天该型号的**总样本条数** —— 最低价的稳定性取决于它。
+            # 单条样本的"最低价"就是那条本身，跟多天几十条里的最低价
+            # 不是一回事（实测 990 EVO 1TB：1 条 ¥350 vs 2 条 ¥835，算出 +139%）。
+            series["sample_counts"].append(sum(e[5] for e in entries))
 
-            series["new_low"].append(new[0] if new else None)
-            series["used_low"].append(used[0] if used else None)
-            series["all_low"].append(min(lows) if lows else None)
-            series["all_high"].append(max(highs) if highs else None)
-            series["new_avg"].append(new[2] if new else None)
-            series["all_avg"].append(sum(avgs) / len(avgs) if avgs else None)
-
-        # 首次有数据之前的 None 用后面的首个有效值回填，保证图表连续
+        # 只回填**前导** None（首次有数据之前的那几个），让图表左端连续。
+        #
+        # ⚠️ 绝不能回填中间缺口和末尾 —— 那是**错数据**：
+        #    某型号按 basis=new 切时，末尾几天可能只有二手没有全新，
+        #    那些位置是 None。回填成"第一个有效值"会让界面显示一个
+        #    很久以前的全新价，而用户以为那是最新的。
+        #    （原实现用 `if v is None` 无差别回填，正是这个毛病。）
+        #    中间缺口保持 None，图表自己会断开 —— 断开的线是诚实的，
+        #    连上去的假线不是。
         for key in SERIES_KEYS:
             seq = series[key]
             first = next((v for v in seq if v is not None), None)
+            if first is None:
+                continue
             for i, v in enumerate(seq):
-                if v is None:
-                    seq[i] = first
+                if v is not None:
+                    break
+                seq[i] = first
 
         frame[pid] = series
     return frame
@@ -556,6 +599,53 @@ def build_snapshot(
         # 否则拿昨天的价跟"今天减 7 天"比，区间口径就错了。
         prev = _lookup(dates, low, last_date - timedelta(days=period))
         pct = _pct(last, prev)
+
+        # ---- 可比性闸门：平台口径不一致时**不出涨跌幅** ----
+        #
+        # 「全市场最低价」是跨平台取 min，**样本一换结论就变**。实测 RTX 5090：
+        #   9/17 有 3 个平台（最低 ¥7898，闲鱼二手）→ 9/22 只剩 1 个
+        #   （¥47777，拼多多全新）→ 直接取差值 = **+505%**，
+        #   而真实市场并没有涨 5 倍 —— 那是**口径换了**，不是涨价。
+        #
+        # 判据用**平台集合的 Jaccard 重合度**，不是"平台数量"：
+        #   · 两天都只有闲鱼 → 重合度 1.0 → **可比**（同为二手口径）
+        #     （早先试过"平台数必须 ≥2"，结果 123 个型号只剩 2 个有涨跌幅 ——
+        #       真实数据里大部分型号每天就只有闲鱼一个平台）
+        #   · 昨天 {jd,pdd,xianyu}、今天 {pdd} → 重合度 0.33 → 不可比
+        # 不够就置空（界面显示 —）。**宁可缺，不可错**：
+        # 一个 +505% 的假信号比一个空格有害得多。
+        sets = series.get("platform_ids") or []
+        counts_s = series.get("sample_counts") or []
+        prev_idx = _lookup_idx(dates, last_date - timedelta(days=period))
+        comparable = False
+        if sets and idx < len(sets) and prev_idx is not None and prev_idx < len(sets):
+            a, b = sets[idx], sets[prev_idx]
+            union = a | b
+            # 平台口径重合（Jaccard ≥ 0.5）
+            same_channels = bool(union) and len(a & b) / len(union) >= 0.5
+            # 且两天的**样本量都够**（各 ≥3 条）。
+            # 单条样本的"最低价"就是那条本身，与几十条里的最低价不可比 ——
+            # 实测 i3-12100F：9/22 有 26 条（最低 ¥352）→ 9/23 只有 1 条 ¥975，
+            # 平台集合是 {jd,xianyu} vs {jd}（Jaccard 0.5，放行了），
+            # 但样本量 26→1，算出 +177% 的假暴涨。
+            MIN_SAMPLES = 3
+            enough = (
+                idx < len(counts_s) and counts_s[idx] >= MIN_SAMPLES
+                and prev_idx < len(counts_s) and counts_s[prev_idx] >= MIN_SAMPLES
+            )
+            # 样本量还要**量级相当**：17 条里的最低价和 3 条里的最低价不是一回事
+            # —— 样本越多越容易捞到极端低价，min 自然更低。
+            # 实测 990 PRO 2TB：同为闲鱼，9/16 有 17 条（最低 ¥450），
+            # 9/21 只有 3 条（¥1029）→ 算出 +129%，但市场并没有涨一倍。
+            # 放宽到 4 倍，只挡量级差（正常日间波动一般在 2 倍以内）。
+            balanced = True
+            if enough:
+                a_n, b_n = counts_s[idx], counts_s[prev_idx]
+                balanced = max(a_n, b_n) <= min(a_n, b_n) * 4
+            comparable = same_channels and enough and balanced
+        if not comparable:
+            pct = None
+
         spark = [v for v in low[: idx + 1][-30:] if v is not None]
         per90 = _percentile(low, 90)
         rows.append(
@@ -571,7 +661,13 @@ def build_snapshot(
                 "latest_new_low": _r(series["new_low"][-1]),
                 "latest_used_low": _r(series["used_low"][-1]),
                 "prev": _r(prev),
-                "abs": _r((last - prev) if (last is not None and prev is not None) else None),
+                # abs 与 change_pct 同生共死 —— 涨跌幅不可比时，绝对差值同样不可比，
+                # 不能只藏一个留一个（否则界面上会出现"有价差但没百分比"的怪状态）
+                "abs": _r(
+                    (last - prev)
+                    if (comparable and last is not None and prev is not None)
+                    else None
+                ),
                 "change_pct": None if pct is None else _r(pct, 2),
                 "percentile_90d": _r(per90, 1),
                 "sparkline": [round(v, 2) for v in spark],
