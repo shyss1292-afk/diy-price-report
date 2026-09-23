@@ -1072,6 +1072,87 @@ def test_capacity_disambiguation() -> None:
           ids.get(m.match("i5 12400F 散片", category=None)) == "i5-12400F")
 
 
+def test_wall_clock_guard_absolute_time() -> None:
+    """墙钟兜底必须基于**绝对时间戳 + 短轮询**，不能是一次长 sleep。
+
+    2026-09-23 复盘发现的真实故障：机器休眠时 `time.sleep()` 的计时会被**冻结**
+    （macOS 上它基于 mach_absolute_time，不计入休眠时长）。于是
+    `time.sleep(35*60)` 在整夜休眠后几乎没走 —— 一轮采集的**墙钟**耗时被拉到
+    **12~15 小时**，一直霸占单实例锁，9/23 整天只跑成了 1 轮。
+
+    改法：记下 `time.time()`（Epoch 墙钟，**含**休眠时间）作起始值，
+    守护线程每几秒醒一次比对绝对经过时长。机器睡 6 小时后唤醒，
+    最迟一个轮询周期内就会自杀。
+    """
+    import inspect
+    import subprocess
+    import sys
+
+    from app.services import pipeline
+
+    src = inspect.getsource(pipeline._install_wall_clock_guard)
+    check("用 time.time() 记起始时刻（绝对墙钟，含休眠）", "_time.time()" in src)
+    # ⚠️ 断言**调用形式**（`_time.monotonic(`），不要断言"源码里不出现 monotonic"
+    #    —— 注释里恰好写着"不能用 time.monotonic()"，负向检查会误报。
+    check("**不用** _time.monotonic() —— 它在 macOS 上休眠期间会冻结",
+          "_time.monotonic(" not in src)
+    check("是短轮询循环，不是一次长 sleep",
+          "while True" in src and "_time.sleep(poll)" in src)
+    check("每轮重新比对绝对经过时长", "_time.time() - started_at" in src)
+    check("轮询周期自适应（默认 5s，阈值很小时收紧到 1s 以内）",
+          "min(5.0, limit / 10.0)" in src)
+
+    # 行为验证：真起一个子进程装守护线程，看它是否准点以退出码 3 自杀。
+    # 不启动浏览器 —— 只验证计时与强杀本身。
+    prog = (
+        "import os, sys, time\n"
+        "sys.path.insert(0, '.')\n"
+        "os.environ['DIYPRICE_COLLECT_MAX_SECONDS'] = '1.5'\n"
+        "from app.services.pipeline import _install_wall_clock_guard, wall_clock_limit\n"
+        "_install_wall_clock_guard(wall_clock_limit())\n"
+        "time.sleep(120)\n"
+    )
+    t0 = time.monotonic()
+    proc = subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                          text=True, cwd=str(Path(__file__).resolve().parent.parent),
+                          timeout=30)
+    elapsed = time.monotonic() - t0
+    check("阈值 1.5s → 退出码为 3（硬退出）", proc.returncode == 3,
+          f"实际 {proc.returncode}")
+    check("阈值 1.5s → 在 1.5~3.5s 内精准触发",
+          1.4 <= elapsed <= 3.5, f"实际 {elapsed:.2f}s")
+
+
+def test_sleep_resistance_and_lock() -> None:
+    """休眠对抗（caffeinate）与单实例锁的绝对时间戳判定。
+
+    两者必须配套：caffeinate 让正常轮次不被休眠打断；万一还是被打断了，
+    锁的陈旧判定要基于**绝对 Epoch 时间**，否则"只跑了 10 分钟"的进程
+    可能已经霸占锁 12 小时。
+    """
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parent / "collect_scheduled.sh").read_text(encoding="utf-8")
+
+    check("用 caffeinate 阻止本轮休眠", "caffeinate -dimsu" in script)
+    check("caffeinate 用 `-w $$` 跟脚本生命周期绑定（脚本退出自动收工）",
+          "caffeinate -dimsu -w $$" in script)
+    check("caffeinate 作为**独立后台进程**，不是包住采集命令",
+          "caffeinate -dimsu -w $$ &" in script)
+    check("退出时清理 caffeinate", "kill \"$CAFFEINATE_PID\"" in script)
+    check("找不到 caffeinate 时明确告警，不静默跳过",
+          "找不到 caffeinate" in script)
+
+    check("锁里显式记录绝对起始时间戳", 'date +%s > "$LOCK/started"' in script)
+    check("陈旧判定优先读显式时间戳", 'cat "$LOCK/started"' in script)
+    check("没有显式时间戳才退回目录 mtime（兼容老锁）",
+          'stat -f %m "$LOCK"' in script)
+    check("接管日志里带上绝对时长与阈值（便于事后核对）",
+          "绝对时长" in script and "阈值" in script)
+    check("退出 trap 同时释放锁并收掉 caffeinate",
+          "cleanup()" in script and "trap cleanup EXIT" in script)
+
+
 def test_watchdog_group_broadcast() -> None:
     """看门狗必须**按进程组广播**，不能退回单 PID。
 
@@ -1201,6 +1282,8 @@ def main() -> int:
         test_db_pragmas,
         test_stale_log_threshold,
         test_wall_clock_limit,
+        test_wall_clock_guard_absolute_time,
+        test_sleep_resistance_and_lock,
         test_watchdog_group_broadcast,
         test_anti_popup_config,
         test_request_slimming_rules,

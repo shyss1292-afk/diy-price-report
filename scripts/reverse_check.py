@@ -187,6 +187,30 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "        return candidates[0]",
     ),
     (
+        "墙钟兜底退回一次长 sleep（休眠期间计时冻结，一轮可跨 12 小时）",
+        PIPELINE,
+        "            _time.sleep(poll)\n            elapsed = _time.time() - started_at",
+        "            _time.sleep(limit)\n            elapsed = _time.time() - started_at",
+    ),
+    (
+        "墙钟兜底改用 monotonic（休眠期间同样冻结）",
+        PIPELINE,
+        "    started_at = _time.time()",
+        "    started_at = _time.monotonic()",
+    ),
+    (
+        "去掉 caffeinate（采集期间允许系统休眠）",
+        SCHED,
+        "caffeinate -dimsu -w $$ &",
+        "true &",
+    ),
+    (
+        "锁陈旧判定退回目录 mtime（丢掉显式绝对时间戳）",
+        SCHED,
+        'started_at="$(cat "$LOCK/started" 2>/dev/null || true)"',
+        'started_at=""',
+    ),
+    (
         "看门狗退回单 PID 广播（Chrome / node 驱动会变孤儿）",
         SCHED,
         'kill -TERM -- "-$pgid" 2>/dev/null',

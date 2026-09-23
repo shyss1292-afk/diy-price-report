@@ -80,30 +80,53 @@ def _install_wall_clock_guard(limit: float) -> None:
         **不经过信号机制**，所以即使主线程卡在不可中断的系统调用里、
         或进程对 SIGTERM 无响应（实测这两个卡死进程都无响应），也照样终止。
 
+    ⚠️ 为什么是「绝对时间戳 + 短轮询」而不是「一次长 sleep」
+    -------------------------------------------------------
+    2026-09-23 复盘发现：机器休眠时 **`time.sleep()` 的计时会被冻结**
+    （macOS 上它基于 `mach_absolute_time`，不计入休眠时长）。
+    于是 `time.sleep(35*60)` 在整夜休眠后**几乎没走**，一轮采集的墙钟耗时
+    被拉到 **12~15 小时**，一直霸占单实例锁 —— 9/23 整天只跑成了 1 轮。
+
+    改法：记下启动时刻的**绝对 Epoch 时间**（`time.time()`，它含休眠时间），
+    守护线程每 5 秒醒一次比对一次。这样即使机器睡了 6 小时，
+    **唤醒后第一个轮询（≤5 秒）就会发现已严重超期并立即自杀**。
+
     卡死时顺手 SIGKILL 掉浏览器进程：否则它们会变成孤儿一直吃内存
     （下一次启动的 `_purge_stale` 虽然也会清，但那是下一轮的事了）。
     """
     if limit <= 0:
         return
 
-    def _guard() -> None:
-        _time.sleep(limit)
-        human = (f"{limit / 60:.0f} 分钟" if limit >= 60 else f"{limit:.0f} 秒")
-        logger.error("=" * 68)
-        logger.error("采集已超过 %s 仍未结束（疑似卡在 CDP / 网络等待），强制终止进程", human)
-        logger.error("未完成的任务留在队列里，下一轮会优先重做")
-        logger.error("=" * 68)
-        try:
-            from .session import BROWSER_PROFILE, profile_pids
+    # ⚠️ 必须用 time.time()（Epoch 墙钟，含休眠），**不能用 time.monotonic()**
+    #    —— 后者在 macOS 上基于 mach_absolute_time，休眠期间同样冻结。
+    started_at = _time.time()
+    # 轮询周期：默认 5 秒（唤醒后最迟 5 秒内发现超期）。
+    # 上限阈值很小时（如测试用 10 秒）自动收紧到 1 秒，保证"精准秒级触发"。
+    poll = max(0.5, min(5.0, limit / 10.0))
 
-            for pid in profile_pids(BROWSER_PROFILE):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-        except Exception:  # noqa: BLE001 —— 清理失败不影响强制退出
-            pass
-        os._exit(3)      # 硬退出：不走 atexit、不等线程
+    def _guard() -> None:
+        while True:
+            _time.sleep(poll)
+            elapsed = _time.time() - started_at
+            if elapsed < limit:
+                continue
+            human = (f"{limit / 60:.0f} 分钟" if limit >= 60 else f"{limit:.0f} 秒")
+            logger.error("=" * 68)
+            logger.error("采集已超过 %s 仍未结束（墙钟 %.0f 分钟，疑似卡死或期间休眠），强制终止进程",
+                         human, elapsed / 60)
+            logger.error("未完成的任务留在队列里，下一轮会优先重做")
+            logger.error("=" * 68)
+            try:
+                from .session import BROWSER_PROFILE, profile_pids
+
+                for pid in profile_pids(BROWSER_PROFILE):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+            except Exception:  # noqa: BLE001 —— 清理失败不影响强制退出
+                pass
+            os._exit(3)      # 硬退出：不走 atexit、不等线程
 
     threading.Thread(target=_guard, daemon=True, name="wall-clock-guard").start()
 

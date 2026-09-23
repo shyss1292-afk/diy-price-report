@@ -76,21 +76,69 @@ fi
 # 而且它还握着 SQLite 的写事务不放 —— 新采集即便绕过锁也会
 # `database is locked` 写不进去。
 #
-# 所以：锁里记 PID，接管前先判断持有者是否还活着、锁是否过期。
-LOCK_STALE_SECONDS=2400          # 锁超过 40 分钟即视为卡死（正常一轮 9~10 分钟）
+# 所以：锁里记 PID + **开始时刻的绝对 Epoch 时间戳**，接管前判断
+# 持有者是否还活着、以及是否超过了绝对物理时长。
+#
+# ⚠️ 陈旧判定必须基于**绝对时间戳**（`date +%s` 与 `$LOCK/started` 都是 Epoch 秒），
+#    不能用"运行了多久"这类相对量 —— 机器休眠期间相对计时会停摆，
+#    于是"只跑了 10 分钟"的进程可能已经霸占锁 12 小时。
+#
+# 阈值 2400 秒（40 分钟）与进程内墙钟兜底（35 分钟，绝对时间戳短轮询）配合：
+#    兜底最迟在唤醒后 5 秒内自杀 → 锁随 trap 释放 → 新轮次正常接手。
+#    所以 40 分钟这个阈值留了 5 分钟余量，正常不会被误判成"陈旧"而并发采集。
+LOCK_STALE_SECONDS=2400
 if ! mkdir "$LOCK" 2>/dev/null; then
   holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) ))
+  # 优先读显式记录的起始时刻；没有（老版本遗留的锁）才退回目录 mtime
+  started_at="$(cat "$LOCK/started" 2>/dev/null || true)"
+  if [ -z "$started_at" ]; then
+    started_at="$(stat -f %m "$LOCK" 2>/dev/null || echo 0)"
+  fi
+  age=$(( $(date +%s) - started_at ))
   if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null && [ "$age" -lt "$LOCK_STALE_SECONDS" ]; then
     log "已有采集在进行中（PID ${holder}，已运行 $((age / 60)) 分钟），本轮跳过"
     exit 0
   fi
-  log "⚠️ 检测到失效的锁（PID ${holder:-未知}，已 $((age / 60)) 分钟）—— 强制接管"
+  log "⚠️ 检测到失效的锁（PID ${holder:-未知}，绝对时长 $((age / 60)) 分钟，阈值 $((LOCK_STALE_SECONDS / 60)) 分钟）—— 强制接管"
   rm -rf "$LOCK"
   mkdir "$LOCK" 2>/dev/null || { log "❌ 接管锁失败，本轮放弃"; exit 1; }
 fi
 echo $$ > "$LOCK/pid"
-trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
+# 显式记下**绝对 Epoch 时间戳**，别只靠目录 mtime —— mtime 会被任何写操作改动，
+# 而我们要的是"这一轮从什么时候开始的"这个不可变事实。
+date +%s > "$LOCK/started"
+
+# 阻止本轮采集期间系统休眠（macOS 原生）。
+#
+# 为什么必须有：2026-09-23 复盘发现机器一夜 **120 次 sleep/wake**，
+# 而 `time.sleep()` 在 macOS 上基于 mach_absolute_time，**休眠期间不计时**。
+# 后果：一轮采集的墙钟耗时被拉到 **12~15 小时**，一直霸占单实例锁，
+# 9/23 整天只跑成了 1 轮。
+#
+# 为什么用「后台持有 + trap 清理」而不是 `caffeinate <命令>`：
+#   caffeinate 包住命令时会 fork 一层，Python 再调 os.setpgrp() 就会脱离
+#   caffeinate 的进程组 —— 看门狗的 `kill -- -PGID` 只杀得掉 caffeinate，
+#   杀不掉 Python 那棵树，等于把上一轮刚修好的进程组强杀又废掉。
+#   所以让 caffeinate 作为**独立后台进程**只负责"按住不休眠"，与进程组解耦。
+#
+# `-w $$` 表示"等本脚本退出就自动收工"，不需要额外的存活检查。
+# 参数：-d 防显示器睡眠 / -i 防空闲睡眠 / -m 防磁盘睡眠 / -s 防系统挂起 / -u 声明用户活跃
+CAFFEINATE_PID=""
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -dimsu -w $$ &
+  CAFFEINATE_PID=$!
+  log "已启动 caffeinate（PID ${CAFFEINATE_PID}）阻止本轮期间系统休眠"
+else
+  log "⚠️ 找不到 caffeinate，本轮不防休眠"
+fi
+
+cleanup() {
+  rm -rf "$LOCK" 2>/dev/null || true
+  if [ -n "${CAFFEINATE_PID:-}" ]; then
+    kill "$CAFFEINATE_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 log "──────── 采集轮次开始 ────────"
 
