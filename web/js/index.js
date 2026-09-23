@@ -297,7 +297,7 @@ function cardHtml(it) {
     <a class="pcard" href="/product?id=${it.product_id}">
       <div class="pcard-top">
         <div>
-          <div class="pcard-model">${esc(it.model)}</div>
+          <div class="pcard-model">${esc(it.model)}${freshBadge(it)}</div>
           <div class="pcard-spec">${esc(it.brand)} · ${esc(it.category_label)}</div>
         </div>
         ${trendPill(it.change_pct)}

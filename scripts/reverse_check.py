@@ -40,6 +40,7 @@ PROBE = PROJ / "app/services/probe.py"
 SEED = PROJ / "app/seed_data.py"
 CLEAN = PROJ / "app/services/clean.py"
 NORMALIZE = PROJ / "app/services/normalize.py"
+TREND = PROJ / "app/services/trend.py"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
 SCHED = PROJ / "scripts/collect_scheduled.sh"
@@ -187,6 +188,18 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "        return candidates[0]",
     ),
     (
+        "最新报价兜底退回 low[-1]（basis=new/used 下会把有数据的型号误判成空白）",
+        TREND,
+        "        for i in range(len(low) - 1, -1, -1):\n            if low[i] is not None:\n                idx = i\n                break",
+        "        idx = len(low) - 1 if low else None",
+    ),
+    (
+        "涨跌基准退回 dates[-1]（拿昨天价跟今天减 N 天比，区间口径错）",
+        TREND,
+        "        prev = _lookup(dates, low, last_date - timedelta(days=period))",
+        "        prev = _lookup(dates, low, dates[-1] - timedelta(days=period))",
+    ),
+    (
         "墙钟兜底退回一次长 sleep（休眠期间计时冻结，一轮可跨 12 小时）",
         PIPELINE,
         "            _time.sleep(poll)\n            elapsed = _time.time() - started_at",
@@ -262,7 +275,7 @@ def main() -> int:
 
     try:
         for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED,
-                 SESSION, WORKER}:
+                 SESSION, WORKER, TREND}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak

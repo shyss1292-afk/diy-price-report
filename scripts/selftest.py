@@ -1153,6 +1153,51 @@ def test_sleep_resistance_and_lock() -> None:
           "cleanup()" in script and "trap cleanup EXIT" in script)
 
 
+def test_latest_quote_fallback() -> None:
+    """「最新有效报价兜底」：今天没轮巡到的型号，回退展示它最近一次的报价。
+
+    为什么需要（2026-09-23）：整点分批轮巡 130 个型号，一天里前几轮跑不到的
+    型号在界面上是空白。用户看到"没有数据"会以为系统坏了，其实是**还没轮到**。
+
+    改造要点（两个都不做就会出问题）：
+      1. 从末尾往前找**第一个有值**的日期 —— 不能直接取 `low[-1]`：
+         `dates` 是该型号自己有数据的日期，但按 basis=new/used 切时，
+         某天可能只有二手没有全新，那个位置就是 None，
+         直接取末位会把"有数据的型号"误判成空白。
+      2. 涨跌基准跟着**数据日期**走，不是跟着"今天"走 ——
+         否则拿昨天的价跟"今天减 7 天"比，区间口径就错了。
+    """
+    import inspect
+    import pathlib
+
+    from app.services import trend
+
+    src = inspect.getsource(trend.build_snapshot)
+    check("返回 captured_date（这条数据是哪天的）", '"captured_date"' in src)
+    check("返回 is_today（是否今日数据）", '"is_today"' in src)
+    check("返回 stale_days（过期天数）", '"stale_days"' in src)
+    check("从末尾往前找第一个有值的日期（不是直接取 low[-1]）",
+          "for i in range(len(low) - 1, -1, -1)" in src and "low[i] is not None" in src)
+    check("涨跌基准跟数据日期走，不是跟今天走",
+          "last_date - timedelta(days=period)" in src)
+    check("全 None 时跳过该型号（不产出空行）", "if idx is None:" in src)
+
+    # 前端：徽标函数必须存在且两个页面都在用
+    web = pathlib.Path(__file__).resolve().parent.parent / "web" / "js"
+    common = (web / "common.js").read_text(encoding="utf-8")
+    check("前端有 freshBadge 徽标函数", "function freshBadge" in common)
+    check("今日数据不加视觉噪音（返回空串）",
+          "if (r.is_today) return '';" in common)
+    check("「从没采到过」与「回退到历史」区分开（前者也返回空串）",
+          "if (!r || !r.captured_date) return '';" in common)
+    for page in ("products.js", "index.js"):
+        t = (web / page).read_text(encoding="utf-8")
+        check(f"{page} 使用了 freshBadge", "freshBadge(" in t)
+
+    css = (pathlib.Path(__file__).resolve().parent.parent / "web" / "css" / "app.css").read_text(encoding="utf-8")
+    check("徽标样式 .stale 已定义", ".stale {" in css)
+
+
 def test_watchdog_group_broadcast() -> None:
     """看门狗必须**按进程组广播**，不能退回单 PID。
 
@@ -1284,6 +1329,7 @@ def main() -> int:
         test_wall_clock_limit,
         test_wall_clock_guard_absolute_time,
         test_sleep_resistance_and_lock,
+        test_latest_quote_fallback,
         test_watchdog_group_broadcast,
         test_anti_popup_config,
         test_request_slimming_rules,

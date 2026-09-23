@@ -124,6 +124,32 @@ function sparkline(values, opts = {}) {
   </svg>`;
 }
 
+/* ---------------------------------------------------------------- 数据新鲜度 */
+
+/**
+ * 数据新鲜度徽标 —— 回退展示历史报价时的轻量标识。
+ *
+ * 为什么要它：整点分批轮巡 130 个型号，一天里前几轮跑不到的型号只能回退
+ * 展示它最近一次的报价。**价格照常显示，但用户必须知道这个价是哪天的** ——
+ * 拿昨天的行情当今天的做决策，比看不到数据更糟。
+ *
+ * 约定：
+ *   · 今日数据 → 返回空串，**不加任何视觉噪音**（绝大多数行都是这种）
+ *   · 回退数据 → 灰底小徽标，只标"过期"，不重复显示价格
+ *   · 从没采到过（captured_date 为 null）→ 也返回空串，
+ *     由各页面自己的「暂无数据」占位处理，两者语义不同不能混
+ */
+function freshBadge(r) {
+  if (!r || !r.captured_date) return '';
+  if (r.is_today) return '';
+  const d = r.stale_days;
+  let text;
+  if (d === 1) text = '昨日';
+  else if (d !== null && d >= 2 && d <= 6) text = `${d} 天前`;
+  else text = String(r.captured_date).slice(5);      // 超过一周直接给 MM-DD
+  return `<span class="stale" title="今日尚未轮巡到该型号，此处为 ${r.captured_date} 的行情">${text}</span>`;
+}
+
 /* ---------------------------------------------------------------- 侧边栏 */
 
 function renderSidebar() {

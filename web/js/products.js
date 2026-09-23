@@ -152,7 +152,7 @@ function render() {
     return `
     <tr class="clickable" onclick="location.href='/product?id=${r.product_id}'">
       <td class="model-cell">
-        <b>${esc(r.model)}</b>
+        <b>${esc(r.model)}</b>${freshBadge(r)}
         <div class="muted" style="font-size:11px">${esc(r.brand)} · ${esc(r.spec || '')}</div>
       </td>
       <td><span class="pill tag">${esc(r.category_label)}</span></td>

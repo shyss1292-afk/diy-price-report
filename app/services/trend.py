@@ -524,6 +524,7 @@ def build_snapshot(
     }
 
     rows: list[dict] = []
+    today = date.today()
     for pid, series in frame.items():
         product = products.get(pid)
         if product is None:
@@ -531,10 +532,31 @@ def build_snapshot(
         dates, low = series["dates"], series[key]
         if not dates:
             continue
-        last = low[-1]
-        prev = _lookup(dates, low, dates[-1] - timedelta(days=period))
+
+        # 「最新有效报价兜底」：从末尾往前找**第一个有值**的日期。
+        #
+        # 为什么不能直接取 `low[-1]`：`dates` 是这个型号**自己有数据**的日期，
+        # 但按 basis=new / used 口径切时，某天可能只有二手、没有全新 ——
+        # 那个位置就是 None，直接取末位会把"有数据的型号"误判成空白。
+        #
+        # 另外整点分批轮巡下，型号今天可能还没轮到，末位日期就是昨天/前天。
+        # 这不是要隐藏的缺陷，而是**要如实标出来**的信息（见 captured_date /
+        # is_today / stale_days 三个字段）—— 用户有权知道这个价是哪天的。
+        idx = None
+        for i in range(len(low) - 1, -1, -1):
+            if low[i] is not None:
+                idx = i
+                break
+        if idx is None:
+            continue
+
+        last_date = dates[idx]
+        last = low[idx]
+        # 涨跌基准跟着**数据日期**走，不是跟着"今天"走 ——
+        # 否则拿昨天的价跟"今天减 7 天"比，区间口径就错了。
+        prev = _lookup(dates, low, last_date - timedelta(days=period))
         pct = _pct(last, prev)
-        spark = [v for v in low[-30:] if v is not None]
+        spark = [v for v in low[: idx + 1][-30:] if v is not None]
         per90 = _percentile(low, 90)
         rows.append(
             {
@@ -553,6 +575,10 @@ def build_snapshot(
                 "change_pct": None if pct is None else _r(pct, 2),
                 "percentile_90d": _r(per90, 1),
                 "sparkline": [round(v, 2) for v in spark],
+                # ---- 数据新鲜度：前端据此标「今日」/「昨日」/「N 天前」----
+                "captured_date": last_date.isoformat(),
+                "is_today": last_date == today,
+                "stale_days": (today - last_date).days,
             }
         )
     return rows

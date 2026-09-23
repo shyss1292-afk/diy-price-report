@@ -241,6 +241,12 @@ def list_products(
                 "change_pct": None,
                 "percentile_90d": None,
                 "sparkline": [],
+                # 从没采到过任何行情 —— 与"今天没轮到、回退到历史"要区分开：
+                # 前者 captured_date 为 None（界面显示「暂无数据」），
+                # 后者有日期（界面显示「昨日」/「N 天前」）
+                "captured_date": None,
+                "is_today": False,
+                "stale_days": None,
             }
         )
 

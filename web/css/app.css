@@ -318,6 +318,19 @@ a { color: inherit; text-decoration: none; }
 }
 .cov-note b { color: var(--text-2); font-weight: 600; }
 
+/* 数据新鲜度徽标：回退到历史报价时用。
+   刻意做得**轻**（灰、小、贴边）—— 它要提示"这条不是今天的"，
+   但不能抢价格的视觉权重，否则每屏都在喊。 */
+.stale {
+  display: inline-block; margin-left: 6px;
+  padding: 0 5px; font-size: 10px; line-height: 16px;
+  border-radius: var(--radius-xs);
+  background: var(--panel-3); color: var(--text-3);
+  border: 1px solid var(--border);
+  font-weight: 500; letter-spacing: .2px;
+  vertical-align: 1px; white-space: nowrap;
+}
+
 /* ---------------------------------------------------------------- 涨跌 */
 .up { color: var(--up); }
 .down { color: var(--down); }
