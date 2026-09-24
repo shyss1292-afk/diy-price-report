@@ -1153,6 +1153,36 @@ def test_sleep_resistance_and_lock() -> None:
           "cleanup()" in script and "trap cleanup EXIT" in script)
 
 
+def test_pdd_home_warmup() -> None:
+    """拼多多搜索前必须先落地首页（2026-09-24 实测）。
+
+    **直接深链到搜索 URL 会被重定向到 `psnl_verification.html`（安全验证）**，
+    采集器把它判成限流 → 整轮 0 条 → 连续几次就吃满退避阶梯。
+    今早 08:01 那次「命中 login.html → 24 小时退避」有一部分就是这个成因。
+
+    先访问一次首页拿到会话上下文再搜索就正常 —— 实测连抓 3 个型号
+    **3/3 成功、每个 20 条**（RTX 5090 ¥49830 / RTX 5080 ¥18300 /
+    RTX 5070 Ti ¥9389），~8.7s/型号。
+
+    ⚠️ 判据用「当前 URL 不含 search_result」而不是「只做一次」——
+       被验证页劫持后（URL 变成 psnl_verification.html）下一轮会自动
+       重新预热，**能自愈**，不用重启 Worker。
+    """
+    import inspect
+
+    from app.collectors import pdd_source as S
+
+    check("定义了首页常量", hasattr(S, "HOME_URL") and "yangkeduo.com" in S.HOME_URL)
+
+    src = inspect.getsource(S.PddCollector._search)
+    check("搜索前有预热步骤", "HOME_URL" in src)
+    check("预热判据是「当前不在搜索页」而非「只做一次」（可自愈）",
+          '"search_result" not in (page.url or "")' in src)
+    check("预热失败不致命（不能让一次预热失败废掉整轮）",
+          "except Exception:" in src and "预热失败不致命" in src)
+    check("预热在 navigate 之前", src.index("HOME_URL") < src.index("policy.navigate(page, url"))
+
+
 def test_schedule_avoids_commute() -> None:
     """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
 
@@ -1498,6 +1528,7 @@ def main() -> int:
         test_scope_gpu_cpu_only,
         test_browser_launch_defense,
         test_schedule_avoids_commute,
+        test_pdd_home_warmup,
         test_watchdog_group_broadcast,
         test_anti_popup_config,
         test_request_slimming_rules,

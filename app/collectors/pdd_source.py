@@ -27,6 +27,9 @@ from .registry import register
 
 logger = logging.getLogger("diyprice.collector.pdd")
 
+# 首页。搜索前必须先落地这里 —— 直接深链搜索 URL 会触发安全验证，
+# 成因与实测见 `_search()` 里的预热注释。
+HOME_URL = "https://mobile.yangkeduo.com/"
 SEARCH_URL = "https://mobile.yangkeduo.com/search_result.html?search_key={kw}"
 
 MOBILE_UA = (
@@ -115,6 +118,29 @@ class PddCollector(BaseCollector):
 
     def _search(self, page, product) -> list[Quote]:
         url = SEARCH_URL.format(kw=urllib.parse.quote(product.model))
+
+        # 预热：先落到首页，再进搜索页。
+        #
+        # 为什么需要（2026-09-24 实测）
+        # ----------------------------
+        # **直接深链到搜索 URL 会被重定向到 `psnl_verification.html`（安全验证）**，
+        # 采集器把它判成限流 → 整轮 0 条 → 连续几次就吃满退避阶梯。
+        # 今早 08:01 那次「命中 login.html → 24 小时退避」有一部分就是这个成因。
+        #
+        # 先访问一次首页拿到会话上下文再搜索就正常 —— 实测连抓 3 个型号
+        # **3/3 成功、每个 20 条**（RTX 5090 ¥49830 / RTX 5080 ¥18300 /
+        # RTX 5070 Ti ¥9389），耗时 ~8.7s/型号。
+        #
+        # 判据用「当前 URL 不含 search_result」而不是「只做一次」：
+        # 这样被验证页劫持之后（URL 变成 psnl_verification.html）下一轮
+        # 会自动重新预热，**能自愈**，不用重启 Worker。
+        try:
+            if "search_result" not in (page.url or ""):
+                page.goto(HOME_URL, wait_until="domcontentloaded", timeout=self.page_timeout)
+                page.wait_for_timeout(1200)
+        except Exception:  # noqa: BLE001 —— 预热失败不致命，继续走正常流程
+            pass
+
         try:
             # navigate 内按策略严格等到 networkidle（或核心商品节点出现），
             # 再额外留 700ms 给前端 JS 完成 anti-content 签名运算 ——

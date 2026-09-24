@@ -45,6 +45,7 @@ AGGREGATE = PROJ / "app/services/aggregate.py"
 SEED = PROJ / "app/seed_data.py"
 ROUTES = PROJ / "app/api/routes.py"
 SERVICE = PROJ / "scripts/service.sh"
+PDD = PROJ / "app/collectors/pdd_source.py"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
 SCHED = PROJ / "scripts/collect_scheduled.sh"
@@ -192,6 +193,12 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "        return candidates[0]",
     ),
     (
+        "拼多多去掉首页预热（深链搜索触发安全验证，整轮 0 条）",
+        PDD,
+        'if "search_result" not in (page.url or ""):',
+        "if False:",
+    ),
+    (
         "触发时间退回整点（正好压在通勤合盖窗口上）",
         SERVICE,
         '<key>Minute</key><integer>30</integer>',
@@ -333,7 +340,7 @@ def main() -> int:
 
     try:
         for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED,
-                 SESSION, WORKER, TREND, AGGREGATE, SEED, ROUTES, SERVICE}:
+                 SESSION, WORKER, TREND, AGGREGATE, SEED, ROUTES, SERVICE, PDD}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak
