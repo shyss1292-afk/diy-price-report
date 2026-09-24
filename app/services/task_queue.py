@@ -26,6 +26,13 @@
 有些型号在某平台确实无货（京东尤其多）。这类型号不会永远卡在 pending：
 `mark_empty()` 会记录连续空结果次数，超过阈值即判定为「该平台无此型号」
 并结案 —— 否则队列会被永远采不到的型号堵死。
+
+关于「路由排除」
+--------------
+另一类不该留在 pending 的是**按采集源生命周期路由根本不该采**的任务：
+停产老硬件（GTX 10/16 系、RTX 20/30 系、RX 5000/6000 系、12 代及更早的
+Intel、5000 系及更早的 AMD）在京东/拼多多已无正品新货，只走闲鱼。
+路由生效**之前**入队的这类任务由 `retire_routed()` 标成 `routed` 终态结案。
 """
 from __future__ import annotations
 
@@ -47,6 +54,11 @@ STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_EMPTY = "empty"      # 反复采不到，判定该平台无此型号
 STATUS_FAILED = "failed"
+# 按采集源生命周期路由**根本不该采**此源（legacy 型号不走 jd/pdd），终态。
+# 与 `empty` 的区别：`empty` 是"采了但平台没货"（平台侧事实），
+# `routed` 是"按我们的规则不该采"（策略侧决定）—— 分开记，
+# 看队列时才能分辨到底是平台没货还是路由配错。
+STATUS_ROUTED = "routed"
 
 # 连续这么多次空结果就结案（与京东采集器的 max_empty_streak 同量级）
 MAX_EMPTY_ATTEMPTS = 4
@@ -222,6 +234,22 @@ def mark_failed(task_id: str, reason: str = "") -> None:
     _save_raw(data)
 
 
+def retire_routed(task_id: str, reason: str = "") -> None:
+    """把任务标记为「按采集源生命周期路由不该采」，终态，不再回到 pending。
+
+    为什么需要（2026-09-24）
+    ----------------------
+    `pick_targets` 只过滤**新取**的型号。路由生效**之前**入队、当天仍是
+    pending 的 legacy 任务会绕过它被重做 —— 实测 9/24 当天 jd 队列里就躺着
+    `Arc A380 6G` / `GTX 1050 2G` 两个（那天恰好都已 done 才没出事）。
+
+    为什么必须落盘而不是"本轮跳过"：不落盘的话这些任务会永远停在 pending，
+    每轮被捡起一次又被丢掉，队列里积一堆"永远不会完成"的待办，
+    看队列的人无从分辨。落盘成终态后 `clear_finished()` 会正常回收它。
+    """
+    _update(task_id, status=STATUS_ROUTED, last_reason=(reason or "生命周期路由排除")[:120])
+
+
 def recover_stale() -> int:
     """把 running 状态回滚为 pending。
 
@@ -337,7 +365,7 @@ def clear_finished(day: str | None = None, keep_results: bool = False) -> int:
     data = _load_raw()
     drop = [
         tid for tid, raw in data["tasks"].items()
-        if raw.get("status") in (STATUS_DONE, STATUS_EMPTY)
+        if raw.get("status") in (STATUS_DONE, STATUS_EMPTY, STATUS_ROUTED)
         and (day is None or raw.get("day") == day)
     ]
     for tid in drop:

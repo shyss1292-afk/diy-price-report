@@ -1235,17 +1235,89 @@ def test_lifecycle_source_routing() -> None:
         from app.collectors import base as _base
         check("pick_targets 把 source 透传给 build_rotation",
               "build_rotation(products, source=source)" in _inspect.getsource(_base.pick_targets))
-
-        # ⚠️ 光测 `build_rotation` 不够 —— 真正的调用方是 `pick_targets`，
-        #    它忘了把 source 透传下去的话，路由就形同虚设，而上面的断言全绿。
-        #    （反向验证抓到过这条虚守卫。）
-        import inspect as _inspect
-
-        from app.collectors import base as _base
-        check("pick_targets 把 source 透传给 build_rotation",
-              "build_rotation(products, source=source)" in _inspect.getsource(_base.pick_targets))
     finally:
         os.environ.pop("DIYPRICE_FOCUS_CATEGORY", None)
+
+
+def test_queue_route_filter() -> None:
+    """队列**补做**路径也必须过生命周期路由。
+
+    ⚠️ 为什么单独测这一条：`pick_targets` 只过滤**新取**的型号。
+       路由生效**之前**入队、当天仍是 pending 的 legacy 任务会绕过它被重做 ——
+       只测 `build_rotation` / `pick_targets` 的话，这条路径漏了也全绿。
+
+    这是**行为断言**（真造一个队列文件跑 `_next_batch`），不是源码子串断言 ——
+    源码子串断言在这个工程已经漏过三次（见 MEMORY.md 教训 1）。
+    """
+    from datetime import date
+
+    from app.collectors import base as _base
+    from app.services import cursor as _cursor
+    from app.services import task_queue as tq
+
+    class P:
+        def __init__(self, pid, m, c, b):
+            self.id, self.model, self.category, self.brand = pid, m, c, b
+
+    # id 1 / 3 是 legacy，2 / 4 是 active
+    products = [
+        P(1, "GTX 1060 6G", "gpu", "NVIDIA"),
+        P(2, "RTX 5090 32G", "gpu", "NVIDIA"),
+        P(3, "Arc A750 8G", "gpu", "Intel"),
+        P(4, "Arc B580 12G", "gpu", "Intel"),
+    ]
+    day = date(2026, 9, 24)
+
+    with tempfile.TemporaryDirectory() as td:
+        qfile = Path(td) / "collect_queue.json"
+        old_qfile = tq.QUEUE_FILE
+        old_load, old_save = _cursor.load_offset, _cursor.save_offset
+        old_focus = os.environ.get("DIYPRICE_FOCUS_CATEGORY")
+        tq.QUEUE_FILE = qfile
+        _cursor.load_offset = lambda src: 0          # 别动真游标
+        _cursor.save_offset = lambda src, off: None
+        os.environ["DIYPRICE_FOCUS_CATEGORY"] = "gpu"
+        try:
+            # --- 场景 A：队列够填满本轮（不走"补新取"分支）---
+            tq.enqueue("jd", [(1, "GTX 1060 6G"), (3, "Arc A750 8G")], day)
+            tq.enqueue("jd", [(2, "RTX 5090 32G")], day)
+            batch = [t.model for t in _base._next_batch("jd", products, day, 2)]
+            check("队列里的 legacy 任务不被派发给 jd",
+                  "GTX 1060 6G" not in batch and "Arc A750 8G" not in batch,
+                  f"实际派发：{batch}")
+            check("队列里的 active 任务照常派发", "RTX 5090 32G" in batch, f"实际派发：{batch}")
+            check("被排除的任务落盘为 routed 终态（不再占 pending）",
+                  tq.pending("jd", day) == [] or
+                  all(t.model not in ("GTX 1060 6G", "Arc A750 8G") for t in tq.pending("jd", day)),
+                  f"仍 pending：{[t.model for t in tq.pending('jd', day)]}")
+
+            # --- 场景 B：队列不够 → 走"补新取 + 重读队列"分支 ---
+            tq.reset_running_and_pending("jd")
+            tq.enqueue("jd", [(1, "GTX 1060 6G")], day)      # 只剩 legacy
+            tq.enqueue("jd", [(2, "RTX 5090 32G")], day)
+            batch_b = [t.model for t in _base._next_batch("jd", products, day, 3)]
+            check("补新取后重读队列仍过滤 legacy（场景 B）",
+                  "GTX 1060 6G" not in batch_b, f"实际派发：{batch_b}")
+            check("补新取确实补到了 active 型号（场景 B）",
+                  "RTX 5090 32G" in batch_b and "Arc B580 12G" in batch_b,
+                  f"实际派发：{batch_b}")
+
+            # --- 闲鱼：路由只管 jd/pdd，legacy 必须照常派发 ---
+            tq.enqueue("xianyu", [(1, "GTX 1060 6G")], day)
+            xy = [t.model for t in _base._next_batch("xianyu", products, day, 1)]
+            check("闲鱼照常派发 legacy（路由只管 jd/pdd）", xy == ["GTX 1060 6G"], f"实际：{xy}")
+
+            # --- 未登记的源：宽松兜底，不过滤 ---
+            tq.enqueue("zol", [(1, "GTX 1060 6G")], day)
+            z = [t.model for t in _base._next_batch("zol", products, day, 1)]
+            check("未登记源宽松兜底不过滤（避免把采集整个断掉）", z == ["GTX 1060 6G"], f"实际：{z}")
+        finally:
+            tq.QUEUE_FILE = old_qfile
+            _cursor.load_offset, _cursor.save_offset = old_load, old_save
+            if old_focus is None:
+                os.environ.pop("DIYPRICE_FOCUS_CATEGORY", None)
+            else:
+                os.environ["DIYPRICE_FOCUS_CATEGORY"] = old_focus
 
 
 def test_subcategory_matrix() -> None:
@@ -1664,6 +1736,7 @@ def main() -> int:
         test_schedule_avoids_commute,
         test_pdd_home_warmup,
         test_lifecycle_source_routing,
+        test_queue_route_filter,
         test_subcategory_matrix,
         test_watchdog_group_broadcast,
         test_anti_popup_config,

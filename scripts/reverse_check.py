@@ -206,6 +206,12 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "    ordered = build_rotation(products)",
     ),
     (
+        "队列补做不做生命周期过滤（路由生效前入队的 legacy 任务被派发给 jd/pdd）",
+        BASE,
+        "    return lifecycle_of(product.model, product.category, product.brand) in allowed",
+        "    return True",
+    ),
+    (
         "拼多多去掉首页预热（深链搜索触发安全验证，整轮 0 条）",
         PDD,
         'if "search_result" not in (page.url or ""):',

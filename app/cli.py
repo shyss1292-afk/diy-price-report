@@ -384,8 +384,9 @@ def cmd_queue(args) -> int:
     labels = {
         "pending": "待办", "running": "进行中", "done": "已完成",
         "empty": "无此型号(结案)", "failed": "失败",
+        "routed": "路由排除(结案)",
     }
-    for key in ("pending", "running", "done", "empty", "failed"):
+    for key in ("pending", "running", "done", "empty", "failed", "routed"):
         if s["by_status"].get(key):
             print(f"       {labels.get(key, key):<16} {s['by_status'][key]}")
     if s["by_source"]:

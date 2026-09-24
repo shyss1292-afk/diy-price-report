@@ -179,21 +179,75 @@ def pick_round_robin(products: list, limit: int) -> list:
 logger = logging.getLogger("diyprice.collector")
 
 
+def route_allows(source: str, product) -> bool:
+    """该采集源是否允许采这个型号（生命周期路由）。
+
+    源不在 `SOURCE_LIFECYCLES` 里时**放行**（宽松兜底）—— 与 `build_rotation`
+    同口径：新增数据源时忘了登记，只是少省一点配额，不会把采集整个断掉。
+    """
+    from ..seed_data import SOURCE_LIFECYCLES, lifecycle_of
+
+    allowed = SOURCE_LIFECYCLES.get(source)
+    if allowed is None:
+        return True
+    return lifecycle_of(product.model, product.category, product.brand) in allowed
+
+
+def split_routed(source: str, tasks: list, by_id: dict) -> tuple[list, list]:
+    """把队列任务按生命周期路由切成 (可派发, 该退役)。
+
+    ⚠️ 为什么必须在**队列出口**再筛一次：`pick_targets` 只过滤**新取**的型号。
+       路由生效**之前**入队、当天仍是 pending 的 legacy 任务会绕过它被重做 ——
+       实测 9/24 当天 jd 队列里就躺着 `Arc A380 6G` / `GTX 1050 2G` 两个。
+       （那天恰好两个都已 done 才没出事，属于运气，不是设计。）
+
+    ⚠️ 型号不在 `by_id` 里时**放行**，交给下游按「型号已不存在」处理 ——
+       这里不该替下游做那个判断。
+    """
+    kept: list = []
+    retired: list = []
+    for task in tasks:
+        product = by_id.get(task.product_id)
+        if product is not None and not route_allows(source, product):
+            retired.append(task)
+        else:
+            kept.append(task)
+    return kept, retired
+
+
 def _next_batch(source: str, products: list, day: date, limit: int) -> list:
     """取本轮要做的任务：**优先重做队列里积压的**，不够再从游标补新的。
 
     这个顺序是断点续爬的关键 —— 崩在半路的任务会被优先捡起来，
     而不是等游标转一整圈（几十轮）才回头。同时队列也不会无限积压。
+
+    ⚠️ 队列出口必须再过一遍生命周期路由（见 `split_routed`），
+       且被排除的要**落盘退役** —— 只跳过不落盘的话它们会永远停在 pending。
     """
     from ..services import task_queue as tq
 
-    queued = tq.pending(source, day)
+    by_id = {p.id: p for p in products}
+
+    def _pending_after_route() -> list:
+        kept, retired = split_routed(source, tq.pending(source, day), by_id)
+        for task in retired:
+            tq.retire_routed(task.task_id, f"生命周期路由：{task.model} 不走 {source}")
+        if retired:
+            logger.warning(
+                "%s 队列里 %d 个型号按生命周期路由不该采（legacy 只走闲鱼），已退役：%s",
+                source, len(retired), "、".join(t.model for t in retired[:5]),
+            )
+        return kept
+
+    queued = _pending_after_route()
     if len(queued) < limit:
         need = limit - len(queued)
         fresh = pick_targets(products, need, source=source)
         if fresh:
             tq.enqueue(source, [(p.id, p.model) for p in fresh], day)
-        queued = tq.pending(source, day)
+        # 重读队列时**仍走同一条过滤**，不能直接 `tq.pending()` ——
+        # 否则这里会把刚补进来的和历史遗留的 legacy 任务一起放回去。
+        queued = _pending_after_route()
     return queued[:limit]
 
 
