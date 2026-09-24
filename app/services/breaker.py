@@ -121,12 +121,27 @@ _SOFT_MARKERS: tuple[str, ...] = (
     "40001",       # 拼多多的签名/限流错误码
 )
 
-# 软风控的退避上限（秒）。默认 15 分钟。
+# 软风控**专用**退避阶梯：连续第 N 次软风控对应的冷却秒数，末级封顶。
+# 15min / 2h / 4h —— 可用 DIYPRICE_BREAKER_SOFT_LADDER 覆盖（逗号分隔秒数）。
 #
-# 为什么是 15 分钟：调度是**每小时一轮**，15 分钟短于轮次间隔 ——
-# 于是"软风控不会让任何一个定时轮次被跳过"，同时又不至于无限等。
-# 真要更保守可调大（见 DIYPRICE_BREAKER_SOFT_CAP）。
-_DEFAULT_SOFT_CAP = 900.0
+# 为什么软风控要单独一条阶梯，而不是套一个 15 分钟的小上限（2026-09-24 改）
+# ----------------------------------------------------------------------
+# 原设计是"软风控一律封顶 15 分钟"，理由是「15 分钟 < 轮次间隔 60 分钟，
+# 所以软风控不会让任何一个定时轮次被跳过」。这条理由**已被实测推翻**：
+#
+#     09:46:14 退避到期 → 10:31:22 重试 → 10:31:35 立刻再次命中「系统繁忙」
+#
+# 即"退避到期"和"风控解除"是两件事。15 分钟封顶的实际效果是**每小时都去撞一次**，
+# 既拿不到数据，又在持续给账号累积风控信号。
+#
+# 所以改成阶梯递增：
+#   · 第 1 次 15 分钟 —— 短于轮次间隔，首犯不跳过任何一轮（也容得下偶发抖动）
+#   · 第 2 次 2 小时   —— **刻意**跨轮跳过，给账号一段真实的冷却期
+#   · 第 3 次起 4 小时 —— 跳过 3 个轮次，等平台自己消气
+#
+# ⚠️ 加大退避**不解决**风控本身（只是少撞几次）。若连续多轮都恢复不了，
+#    该查的是采集侧的首页预热 / UA / 视口，或把该源整体降级为"每天探一次"。
+_DEFAULT_SOFT_LADDER: tuple[float, ...] = (900.0, 7200.0, 14400.0)
 
 # 给日志/CLI 用的中文标签
 SEVERITY_LABEL: dict[str, str] = {"hard": "硬拦截", "soft": "软风控"}
@@ -168,13 +183,30 @@ def backoff_ladder() -> tuple[float, ...]:
     return _DEFAULT_BACKOFF_LADDER
 
 
+def soft_ladder() -> tuple[float, ...]:
+    """当前生效的**软风控专用**退避阶梯（`DIYPRICE_BREAKER_SOFT_LADDER` 可覆盖）。
+
+    与硬阶梯分开的理由见 `_DEFAULT_SOFT_LADDER` 上方注释。
+    留环境变量覆盖同样是为了排障：阶梯以小时计，压到秒级才能做端到端演练。
+    """
+    raw = os.getenv("DIYPRICE_BREAKER_SOFT_LADDER", "").strip()
+    if raw:
+        try:
+            vals = tuple(float(x) for x in raw.split(",") if x.strip())
+            if vals:
+                return vals
+        except ValueError:
+            logger.warning("DIYPRICE_BREAKER_SOFT_LADDER 解析失败，改用默认阶梯：%s", raw[:80])
+    return _DEFAULT_SOFT_LADDER
+
+
 def backoff_for(trips: int, severity: str = "hard") -> float:
     """连续第 `trips` 次熔断对应的冷却秒数（超出阶梯长度取末级封顶）。
 
-    `severity="soft"` 时再套一层 `soft_cap()`（默认 15 分钟）——
-    平台自己"繁忙"不该让我们几小时不采；只有硬拦截才走完整阶梯。
+    硬 / 软走**两条独立阶梯**：硬拦截用 `backoff_ladder()`（30min/2h/6h/24h），
+    软风控用 `soft_ladder()`（15min/2h/4h）。软风控额外受 `soft_cap()` 总上限约束。
     """
-    ladder = backoff_ladder()
+    ladder = soft_ladder() if severity == "soft" else backoff_ladder()
     index = max(1, int(trips)) - 1
     rung = ladder[min(index, len(ladder) - 1)]
     if severity == "soft":
@@ -183,11 +215,18 @@ def backoff_for(trips: int, severity: str = "hard") -> float:
 
 
 def soft_cap() -> float:
-    """软风控的退避上限（秒），`DIYPRICE_BREAKER_SOFT_CAP` 可覆盖。"""
-    try:
-        return max(0.0, float(os.getenv("DIYPRICE_BREAKER_SOFT_CAP", "") or _DEFAULT_SOFT_CAP))
-    except ValueError:
-        return _DEFAULT_SOFT_CAP
+    """软风控退避的**总上限**（秒），默认 = 软阶梯末级（4 小时）。
+
+    `DIYPRICE_BREAKER_SOFT_CAP` 可覆盖 —— 排障时想"不管第几次都只退 N 秒"
+    用它比改阶梯更省事；生产上它不该低于软阶梯末级，否则阶梯等于被压平。
+    """
+    raw = os.getenv("DIYPRICE_BREAKER_SOFT_CAP", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logger.warning("DIYPRICE_BREAKER_SOFT_CAP 解析失败，改用软阶梯末级：%s", raw[:80])
+    return soft_ladder()[-1]
 
 
 def classify(reason: str) -> str:
@@ -264,8 +303,9 @@ def trip(
     """登记一次熔断，返回冷却截止时间戳（epoch 秒）。
 
     冷却时长默认由**跨轮次退避阶梯**决定（见模块头）：连续第 N 次熔断取阶梯
-    第 N 级；若 `severity` 判定为软风控（或未传时由 `classify(reason)` 判出），
-    再套 `soft_cap()` 上限（默认 15 分钟）。
+    第 N 级。硬 / 软走两条独立阶梯 —— 若 `severity` 判定为软风控（或未传时由
+    `classify(reason)` 判出），走 `soft_ladder()`（15min/2h/4h），
+    并再受 `soft_cap()` 总上限约束。
 
     `seconds` 显式传入时按传入值处理 —— 这条路径留给单测与人工排障，
     生产路径不传（见 `base.run_browser_batch`），否则阶梯会被架空。

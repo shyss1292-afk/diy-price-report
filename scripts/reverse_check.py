@@ -84,10 +84,16 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "    return int(quote_count or 0) > 0",
     ),
     (
-        "软风控退避上限失效（系统繁忙也走完整阶梯）",
+        "软风控不走专用阶梯（系统繁忙套用硬拦截阶梯 → 第 2 次起不再跨轮冷却）",
         BREAKER,
-        '    if severity == "soft":\n        return min(rung, soft_cap())',
-        '    if False:\n        return min(rung, soft_cap())',
+        '    ladder = soft_ladder() if severity == "soft" else backoff_ladder()',
+        "    ladder = backoff_ladder()",
+    ),
+    (
+        "软风控阶梯被压平成一律 15 分钟（退避到期即再拦，每小时都去撞）",
+        BREAKER,
+        "_DEFAULT_SOFT_LADDER: tuple[float, ...] = (900.0, 7200.0, 14400.0)",
+        "_DEFAULT_SOFT_LADDER: tuple[float, ...] = (900.0,)",
     ),
     (
         "错误分级顺序反了（先判软再判硬 → 京东真拦截被降级）",

@@ -433,9 +433,13 @@ def cmd_breaker(args) -> int:
     print("     " + " → ".join(
         f"第{i + 1}次 {breaker.human_duration(sec)}" for i, sec in enumerate(ladder)
     ))
-    print(f"     软风控（系统繁忙/429/40001）另设上限："
-          f"{breaker.human_duration(breaker.soft_cap())}"
-          f" —— 平台自己忙不该让我们几小时不采")
+    soft = breaker.soft_ladder()
+    print("     软风控（系统繁忙/429/40001）走**独立**阶梯（递增，不再一律 15 分钟）")
+    print("     " + " → ".join(
+        f"第{i + 1}次 {breaker.human_duration(sec)}" for i, sec in enumerate(soft)
+    ))
+    print(f"     软风控总上限：{breaker.human_duration(breaker.soft_cap())}"
+          f"（DIYPRICE_BREAKER_SOFT_CAP 可压小，排障用）")
 
     print()
     snap = breaker.snapshot()

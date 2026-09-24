@@ -642,25 +642,54 @@ def test_error_severity() -> None:
 
 
 def test_soft_cap() -> None:
-    """软风控退避封顶：平台自己忙，不该让我们几小时不采。"""
+    """软风控走**专用递增阶梯**（15min / 2h / 4h），不再是一律封顶 15 分钟。
+
+    ⚠️ 旧断言「软上限短于轮次间隔 → 软风控不会跳过任何一轮」是**刻意推翻**的。
+       实测：09:46:14 退避到期 → 10:31:22 重试 → 10:31:35 立刻再中「系统繁忙」。
+       说明"退避到期"≠"风控解除"，15 分钟封顶等于每小时都去撞一次。
+       现在第 2 次起**就是要跨轮跳过**，给账号真实冷却期。
+    """
     from app.services import breaker
 
-    ladder = breaker.backoff_ladder()
-    check("硬拦截不受软上限影响（仍走完整阶梯）",
-          breaker.backoff_for(1) == ladder[0] and breaker.backoff_for(4) == ladder[-1])
-    check("软风控各级全部封顶在 soft_cap()",
-          all(breaker.backoff_for(n, "soft") == breaker.soft_cap() for n in (1, 2, 3, 4, 9)),
-          f"cap={breaker.soft_cap()}")
-    check("默认软上限 15 分钟", breaker.soft_cap() == 900.0)
-    check("软上限短于定时轮次间隔（60 分钟）→ 软风控不会跳过任何一轮",
-          breaker.soft_cap() < 3600)
+    hard = breaker.backoff_ladder()
+    check("硬拦截不受软阶梯影响（仍走完整阶梯 30min→…→24h）",
+          breaker.backoff_for(1) == hard[0] and breaker.backoff_for(4) == hard[-1])
+
+    check("软风控阶梯 = 15分钟 / 2小时 / 4小时",
+          breaker.soft_ladder() == (900.0, 7200.0, 14400.0),
+          f"实际 {breaker.soft_ladder()}")
+    check("软风控第 1 次 15 分钟（短于轮次间隔 → 首犯不跳过任何一轮）",
+          breaker.backoff_for(1, "soft") == 900.0)
+    check("软风控第 2 次 2 小时（刻意跨轮跳过，给账号冷却期）",
+          breaker.backoff_for(2, "soft") == 7200.0)
+    check("软风控第 3 次起 4 小时封顶（末级不再递增）",
+          breaker.backoff_for(3, "soft") == 14400.0
+          and breaker.backoff_for(9, "soft") == 14400.0)
+    check("软风控 0 / 负数取第 1 级（不越界）",
+          breaker.backoff_for(0, "soft") == 900.0
+          and breaker.backoff_for(-3, "soft") == 900.0)
+    check("软风控第 2 次长于轮次间隔（60 分钟）→ 会跳过至少 1 个定时轮次",
+          breaker.backoff_for(2, "soft") > 3600)
+    check("软风控第 1 次**不**跳过任何轮次（15min < 60min）",
+          breaker.backoff_for(1, "soft") < 3600)
+    check("默认软上限 = 软阶梯末级（4 小时）", breaker.soft_cap() == 14400.0)
+
     with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_SOFT_CAP": "120"}):
-        check("DIYPRICE_BREAKER_SOFT_CAP 可覆盖",
+        check("DIYPRICE_BREAKER_SOFT_CAP 可把软风控整体压到 120s（排障用）",
               breaker.soft_cap() == 120.0 and breaker.backoff_for(3, "soft") == 120.0)
+    with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_SOFT_LADDER": "60,120"}):
+        check("DIYPRICE_BREAKER_SOFT_LADDER 可覆盖软阶梯（排障用）",
+              breaker.soft_ladder() == (60.0, 120.0)
+              and breaker.backoff_for(1, "soft") == 60.0
+              and breaker.backoff_for(5, "soft") == 120.0)
 
 
 def test_soft_trip_end_to_end() -> None:
-    """软风控 trip 一次，冷却必须落在软上限内（而不是阶梯的 30 分钟）。"""
+    """软风控 trip：第 1 次 15 分钟，连续第 2 次必须升到 2 小时（走真实 trip()）。
+
+    ⚠️ 第 2 次这条是本轮修复的核心 —— 旧逻辑下第 2 次仍是 15 分钟，
+       于是"退避到期即再拦"可以无限循环。
+    """
     from app.services import breaker
 
     tmp = Path(tempfile.mkdtemp(prefix="diyprice_softcap_"))
@@ -670,11 +699,20 @@ def test_soft_trip_end_to_end() -> None:
         breaker.clear()
         breaker.trip("pdd", reason="系统繁忙")
         entry = breaker.entry_of("pdd")
-        check("软风控 trip 后冷却 = 软上限（15 分钟），不是阶梯第 1 级",
+        check("软风控第 1 次 trip 冷却 = 软阶梯第 1 级（15 分钟），不是硬阶梯的 30 分钟",
               880 < breaker.cooldown_remaining("pdd") <= 900,
               f"{entry['cooldown_text']}")
         check("记录里带 severity=soft", entry.get("severity") == "soft")
         check("snapshot 也带 severity", breaker.snapshot()["pdd"]["severity"] == "soft")
+
+        breaker.trip("pdd", reason="系统繁忙")
+        entry2 = breaker.entry_of("pdd")
+        check("软风控连续第 2 次 trip 冷却升到 2 小时",
+              7180 < breaker.cooldown_remaining("pdd") <= 7200,
+              f"{entry2['cooldown_text']}")
+        check("连续计数 trips 累加到 2", entry2.get("trips") == 2)
+        check("第 2 次冷却长于轮次间隔 → 下一个定时轮次会被 Fast-Fail 跳过",
+              breaker.cooldown_remaining("pdd") > 3600)
 
         breaker.clear()
         breaker.trip("jd", reason="访问频繁")
