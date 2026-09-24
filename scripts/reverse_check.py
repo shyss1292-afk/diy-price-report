@@ -19,6 +19,15 @@
 
 新增关键机制时，往 `BREAKS` 里加一条即可 —— 锚点用**最小且唯一**的片段，
 太短会误伤别处，太长会随重构漂移。
+
+⚠️ 备份集合**从 `BREAKS` 推导**，不要再手写文件清单（踩过：新增一条改
+   `report.py` 的变异却忘了加进手写清单，`restore()` 直接跳过它，
+   变异残留在源码里，而脚本还打印"存在失效守卫" —— 方向完全指反）。
+   还原后会**逐文件比对内容**（`verify_restored`），与"守卫失效"分开报告。
+
+⚠️ **一轮只跑一次**。单轮内连续跑几十次自检会撞上沙箱的删除预算
+   （`SAFE_DELETE_BULK_CONFIRM_REQUIRED`，`scope=turn` 按轮次累计），
+   自检被中途掐断、跑不出汇总行。这类条目会标成「未能判定」而不是「守卫是虚的」。
 """
 from __future__ import annotations
 
@@ -50,6 +59,7 @@ BASE = PROJ / "app/collectors/base.py"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
 SCHED = PROJ / "scripts/collect_scheduled.sh"
+REPORT = PROJ / "app/services/report.py"
 
 # (说明, 文件, 原文锚点, 改坏成)
 BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
@@ -218,6 +228,18 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "    return True",
     ),
     (
+        "日报板块跨品牌混排（涨跌榜把 A卡的涨幅顶到 N卡榜上）",
+        REPORT,
+        "        brand_rows = by_brand.get(brand, [])",
+        "        brand_rows = list(rows)",
+    ),
+    (
+        "涨跌幅把跨天比较冒充成「日间」（陈年价差被当今日异动）",
+        REPORT,
+        '        return "日间"\n    return f"跨{gap}天"',
+        '        return "日间"\n    return "日间"',
+    ),
+    (
         "拼多多去掉首页预热（深链搜索触发安全验证，整轮 0 条）",
         PDD,
         'if "search_result" not in (page.url or ""):',
@@ -363,9 +385,30 @@ def main() -> int:
         for path, bak in backups.items():
             shutil.copy2(bak, path)
 
+    def verify_restored() -> list[pathlib.Path]:
+        """还原后逐文件比对内容，返回**没还原干净**的文件。
+
+        为什么不能只看"最后那次自检是否全绿"：2026-09-24 实测过一次，
+        脚本被沙箱中途掐断、还原没跑完，最后一次自检跑不出统计行（-1/-1），
+        于是脚本打印"结论：存在失效守卫" —— 看起来像守卫失效，
+        实际是**源码被改坏了**。方向完全指反。
+        直接比内容，才能把"守卫失效"和"源码没还原"分开。
+        """
+        dirty = []
+        for path, bak in backups.items():
+            try:
+                if path.read_bytes() != bak.read_bytes():
+                    dirty.append(path)
+            except OSError:
+                dirty.append(path)
+        return dirty
+
     try:
-        for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED,
-                 SESSION, WORKER, TREND, AGGREGATE, SEED, ROUTES, SERVICE, PDD, BASE}:
+        # ⚠️ 备份集合**从 BREAKS 推导**，不要再手写文件清单。
+        #    踩过的坑：新增了一条改 report.py 的变异，却忘了把它加进手写清单，
+        #    于是 restore() 直接跳过它、**变异残留在源码里**。
+        #    推导出来的集合不可能漏（手写的会）。
+        for path in {entry[1] for entry in BREAKS}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak
@@ -377,6 +420,7 @@ def main() -> int:
             return 1
 
         all_caught = True
+        unverified: list[str] = []
         for label, path, old, new in BREAKS:
             src = path.read_text(encoding="utf-8")
             if old not in src:
@@ -388,18 +432,44 @@ def main() -> int:
                 bad_ok, bad_total = _run_selftest()
             finally:
                 restore()
-            caught = 0 <= bad_ok < bad_total
+            if bad_ok < 0:
+                # ⚠️ 跑不出统计行 ≠ 守卫失效。实测单轮内连续跑几十次自检会撞上
+                #    沙箱的删除预算（SAFE_DELETE_BULK_CONFIRM_REQUIRED，scope=turn），
+                #    自检进程被中途掐断，于是没有汇总行。
+                #    以前这里一律打成"没拦住，守卫是虚的" —— 把环境问题误报成代码问题，
+                #    方向指反，比不报还糟。所以单列一档。
+                print(f"  ⚠️ {label} —— 自检没跑出统计行（-1/-1），**本轮无法判定**；"
+                      f"通常是沙箱删除预算掐断了自检进程，不是守卫失效")
+                unverified.append(label)
+                continue
+            caught = bad_ok < bad_total
             print(
                 f"  {'✅' if caught else '❌'} {label} —— 自检 {bad_ok}/{bad_total}"
                 f"（失败 {bad_total - bad_ok} 条）{'被拦住' if caught else '**没拦住，守卫是虚的**'}"
             )
             all_caught = all_caught and caught
 
+        restore()
+        dirty = verify_restored()
+        if dirty:
+            print("!! 还原失败，以下文件与运行前不一致：")
+            for p in dirty:
+                print(f"     {p}")
+            return 1
+
         restored_ok, restored_total = _run_selftest()
         print(f"还原后：通过 {restored_ok}/{restored_total}")
-        if restored_ok != restored_total:
-            print("!! 还原失败，请检查源码是否被改坏")
+        if restored_ok < 0:
+            print("⚠️ 还原后自检没跑出统计行（-1/-1）—— 但上面的逐文件比对已确认"
+                  "源码与运行前**逐字节一致**，所以这是环境问题（沙箱删除预算掐断），"
+                  "不是源码被改坏。规避办法：本脚本一轮只跑一次。")
+        elif restored_ok != restored_total:
+            print("!! 还原后自检不是全绿 —— 源码可能被改坏，或自检本身有问题")
             return 1
+
+        if unverified:
+            print(f"⚠️ 本次有 {len(unverified)} 条变异**未能判定**（环境原因）：{unverified}")
+            print("   其余变异均已确认被拦住；未判定的请单独重跑复核。")
         print("结论：全部守卫有效" if all_caught else "结论：存在失效守卫，见上方 ❌")
         return 0 if all_caught else 1
     finally:

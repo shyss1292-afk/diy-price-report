@@ -46,14 +46,14 @@
 from __future__ import annotations
 
 import statistics
-from datetime import timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import Listing, Platform, Product
 from ..seed_bench import bench_label, bench_score, bench_tooltip
-from ..seed_data import CATEGORIES
+from ..seed_data import CATEGORIES, subcategories_of
 from .brands import clean_title, guess_brand, short_model
 
 # 本页只覆盖显卡与 CPU
@@ -115,6 +115,52 @@ def _r(value, digits: int = 2):
     if value is None:
         return None
     return round(float(value), digits)
+
+
+def _day_gap(cur: str | None, prev: str | None) -> int | None:
+    """两个采集交易日之间差几天（用于给涨跌幅**如实标注**比较跨度）。
+
+    为什么要它：原来的 `change_basis` 只有「日间 / 批次」两档，而「日间」的
+    判据仅仅是"两个批次的交易日不同" —— 实测有 6 天跨度的比较也被标成「日间」，
+    于是 RTX 5090 在拼多多上被算出一个 +19,783 元的"日涨"（其实是 09-16 → 09-22）。
+    数字本身没错，标签错了；标签错了，涨跌榜就会把陈年价差顶到榜首。
+    """
+    if not cur or not prev:
+        return None
+    try:
+        return (date.fromisoformat(cur) - date.fromisoformat(prev)).days
+    except ValueError:
+        return None
+
+
+# 单批次变动超过这个比例就**标疑**（不是丢弃，是打标）。
+#
+# 为什么要它：`_pick_representative` 的低价引流剔除需要 ≥4 条样本才启用
+# （样本太少时中位数本身不可靠）。实测 2 条的批次直接漏过，于是
+# RTX 5090 D 32G 在京东被算成 44,899 → 15,499（-29,400，-65%）：
+# 两条标题都写着「RTX 5090D V2 5080 5070TI 5060TI 魔鹰显卡」，是典型的
+# 多型号堆砌标题被规则匹配到了 5090D，价格则是引流价。
+# 显卡单日跌 50% 在真实市场基本不可能，所以这类一律打标给用户看，
+# 并**排除出涨跌榜** —— 但不改数字本身（改数才是真的掩盖）。
+SUSPECT_CHANGE_RATIO = 0.5
+
+
+def change_basis_label(gap: int | None) -> str | None:
+    """涨跌幅的比较基准标签：同批次 / 隔一天 / 跨 N 天。
+
+    ⚠️ 三档而不是两档（2026-09-24 改）。原来只有「日间 / 批次」，而「日间」的
+       判据仅仅是"两个批次的交易日不同" —— 实测有 6 天跨度的比较也被标成「日间」，
+       于是 RTX 5090 在拼多多上被算出一个 +19,783 元的"日涨"
+       （其实是 09-16 → 09-22）。数字本身没错，标签错了；
+       标签错了，涨跌榜就会把陈年价差顶到榜首。
+    """
+    if gap is None:
+        return None
+    if gap == 0:
+        return "批次"
+    if gap == 1:
+        return "日间"
+    return f"跨{gap}天"
 
 
 def _platform_filter(basis: str):
@@ -353,6 +399,7 @@ def build_daily_report(
 
             price = prev = None
             prev_batch = None
+            cur_batch = None
             det: dict = {}
             if series:
                 ordered = sorted(series.items(), reverse=True)   # 新 -> 旧
@@ -369,6 +416,7 @@ def build_daily_report(
 
             # 涨跌幅 = 绝对金额（元），与参考表格一致
             change = None if (price is None or prev is None) else price - prev
+            gap = _day_gap(batch_dates.get(cur_batch), batch_dates.get(prev_batch))
 
             cells.append(
                 {
@@ -378,14 +426,26 @@ def build_daily_report(
                     "is_real": plat.code in REAL_PLATFORMS,
                     "price": _r(price),
                     "change": _r(change),
+                    # ⚠️ 三档而不是两档：同批次（日内）、隔一天（真日间）、跨多天。
+                    #    「跨 N 天」这一档以前被错标成「日间」，会把陈年价差当今日异动。
                     "change_basis": (
-                        "日间" if (change is not None and batch_dates.get(prev_batch) != cur_date)
-                        else ("批次" if change is not None else None)
+                        None if change is None else (change_basis_label(gap) or "批次")
+                    ),
+                    "gap_days": gap,
+                    "prev_price": _r(prev),
+                    # 标疑而不改数：见 SUSPECT_CHANGE_RATIO 的说明
+                    "suspect": bool(
+                        change is not None
+                        and prev
+                        and abs(change) >= abs(prev) * SUSPECT_CHANGE_RATIO
                     ),
                     "has_data": price is not None,
                     "seller": det.get("seller", ""),
                     "url": det.get("url", ""),
                     "synthetic": det.get("synthetic", None),
+                    # 供前端标「昨日 / N 天前」用（见 _row_freshness）
+                    "batch": cur_batch,
+                    "date": batch_dates.get(cur_batch) if cur_batch else None,
                 }
             )
             if price is not None:
@@ -407,6 +467,13 @@ def build_daily_report(
         value_index = _r(bench / day_low, 2) if (bench and day_low) else None
         hist = hist_low.get(product.id)
         title = best_det.get("title", "")
+
+        # 该行**最新**的一个平台批次日期 —— 只要有一个平台今天是新采的，
+        # 这一行就不该被标成「昨日」。字段名与 trend.build_snapshot 对齐，
+        # 否则 common.js 的 freshBadge() 认不出来（见下方行内注释）。
+        cap_dates = [c["date"] for c in cells if c.get("date")]
+        captured = max(cap_dates) if cap_dates else None
+        today_iso = date.today().isoformat()
 
         rows.append(
             {
@@ -441,6 +508,18 @@ def build_daily_report(
                 "cheapest_url": best_det.get("url", ""),
                 "cheapest_condition": best_det.get("condition", ""),
                 "has_real": any(c["is_real"] and c["has_data"] for c in cells),
+                # ---- 数据新鲜度：前端据此标「今日」/「昨日」/「N 天前」----
+                # ⚠️ 字段名必须与 trend.build_snapshot 完全一致（captured_date /
+                #    is_today / stale_days），否则 common.js 的 freshBadge() 认不出来。
+                #    取该行**最新**的一个平台批次 —— 只要有一个平台今天是新采的，
+                #    这一行就不该被标成「昨日」。
+                "captured_date": captured,
+                "is_today": captured == today_iso,
+                "stale_days": (
+                    None
+                    if captured is None
+                    else (date.today() - date.fromisoformat(captured)).days
+                ),
                 "platforms": cells,
             }
         )
@@ -565,6 +644,323 @@ def _row_stats(rows: list[dict]) -> dict:
         "compared": up + down + flat,
         "biggest_up": biggest_up,
         "biggest_down": biggest_down,
+    }
+
+
+# ================================================================ 板块化矩阵
+#
+# 为什么要把日报拆成板块（2026-09-24）
+# ----------------------------------
+# 原来的日报是「一个品类一张大表」：N卡/A卡/I卡、全新/二手全部混排，排序只看参考价。
+# 后果有两个，都是口径问题而不是排版问题：
+#
+#   1. 「涨跌榜」「跌幅最大」是在**混合池**里算的 —— A卡的涨幅会把 N卡的行情顶掉，
+#      闲鱼二手的异动会盖过京东新品的价格。这种排名没有解释力。
+#   2. 想看「N卡二手今天怎么样」，得自己在一张大表里滚着找。
+#
+# 所以按 **品类 × 厂商 × 品相** 切成独立板块，每块的统计 / 涨跌榜 / 重点观察
+# **只在块内计算**，绝不跨块混排。
+
+# 板块的品相维度与标题后缀。全新只覆盖 jd/pdd，二手只覆盖闲鱼（见 Platform.kind）
+SECTION_BASIS: tuple[tuple[str, str], ...] = (
+    ("new", "全新在售"),
+    ("used", "二手流转"),
+)
+SECTION_BASIS_LABEL = dict(SECTION_BASIS)
+
+# 板块内「今日重点观察」：最多挑几条
+WATCH_LIMIT = 4
+# 判「贴近史低」的容差（日低价 ≤ 史低价 × 该系数）
+WATCH_NEAR_LOW_RATIO = 1.02
+
+
+def section_title(brand_label: str, basis: str) -> str:
+    """板块标题，如「N卡 · 全新在售」。"""
+    return f"{brand_label} · {SECTION_BASIS_LABEL.get(basis, basis)}"
+
+
+def section_movers(rows: list[dict], limit: int = 3) -> dict:
+    """板块内的涨跌榜（Top Movers）。
+
+    ⚠️ 只在传入的 `rows`（= 同一品牌、同一品相的子池）里排序。跨品牌混排会造出
+       「N卡全新跌了、被 A卡二手的涨幅顶掉」这种没有意义的对比 —— 这正是本次
+       重构要修的口径问题。
+
+    ⚠️ 排序键取**单平台最大变动**，不把各平台的涨跌**求和**。
+       求和看着像"净变动"，其实是量纲错误：京东 44000 的卡涨 10000、拼多多
+       涨 9000，加起来 19000 既不是任何一个平台的真实变动，也会把双平台型号
+       系统性顶到榜首。单平台口径与结论条的「涨幅最大/跌幅最大」同源。
+
+    ⚠️ 只收**跨度 ≤ 1 天**的变动（同批次 / 隔一天）。跨度更大的（实测有 6 天的）
+       是"陈年价差"，不是今日异动 —— 把它算进"今日涨跌榜"会让榜首全是历史欠账。
+       被排除的条数记在 `stale_excluded` 里**如实报出**，不静默丢弃。
+
+    ⚠️ 也排除**标疑**的变动（单批次变动 ≥ 50%，见 `SUSPECT_CHANGE_RATIO`）。
+       这类多半是标题匹配错位或引流 SKU，数字留着给用户看，但不上榜。
+       条数记在 `suspect_excluded`。
+
+    模拟平台不参与（与 `_row_stats` 一致）—— 程序生成的价格不该进行情榜。
+    """
+    ups: list[dict] = []
+    downs: list[dict] = []
+    compared = 0
+    stale_excluded = 0
+    suspect_excluded = 0
+    for row in rows:
+        moves = []
+        for c in row.get("platforms", []):
+            if not c.get("is_real") or c.get("change") is None:
+                continue
+            gap = c.get("gap_days")
+            if gap is not None and gap > 1:
+                stale_excluded += 1
+                continue
+            if c.get("suspect"):
+                suspect_excluded += 1
+                continue
+            moves.append((c["change"], c["name"], c.get("change_basis")))
+        if not moves:
+            continue
+        compared += 1
+
+        def _entry(change: float, platform: str, basis: str | None) -> dict:
+            return {
+                "product_id": row.get("product_id"),
+                "model": row.get("short_model") or row.get("model"),
+                "full_model": row.get("model"),
+                "brand": row.get("brand"),
+                "day_low": row.get("day_low"),
+                "change": _r(change),
+                "platform": platform,
+                "change_basis": basis,
+                "cheapest_platform": (row.get("cheapest_platform") or {}).get("name"),
+                "captured_date": row.get("captured_date"),
+                "is_today": row.get("is_today"),
+                "stale_days": row.get("stale_days"),
+            }
+
+        best_up = max((m for m in moves if m[0] > 0), key=lambda m: m[0], default=None)
+        best_down = min((m for m in moves if m[0] < 0), key=lambda m: m[0], default=None)
+        if best_up:
+            ups.append(_entry(*best_up))
+        if best_down:
+            downs.append(_entry(*best_down))
+
+    ups.sort(key=lambda e: -e["change"])
+    downs.sort(key=lambda e: e["change"])
+    return {
+        "up": ups[:limit],
+        "down": downs[:limit],
+        "compared": compared,
+        "stale_excluded": stale_excluded,
+        "suspect_excluded": suspect_excluded,
+    }
+
+
+def section_watch(rows: list[dict], limit: int = WATCH_LIMIT) -> list[dict]:
+    """板块内的「今日重点观察」。
+
+    规则（按优先级依次挑，按型号去重，最多 `limit` 条）—— **只在板块内**：
+
+      1. `贴近史低` —— 日低价 ≤ 史低价 × 1.02（且史低价可用），**最多占 2 个名额**
+      2. `跌幅最大` —— 板块内单平台跌幅最大的那个（< 0）
+      3. `涨幅最大` —— 板块内单平台涨幅最大的那个（> 0）
+      4. `性价比最高` —— value_index 最大（CPU 表无此列，自动跳过）
+
+    每条都带 `reason`，前端直接透出 —— 不做「黑箱推荐」。
+
+    ⚠️ 第 1 条要限名额：史低价本身是"窗口内最低"，一旦某型号触及它，
+       规则 1 会把所有名额吃光（实测 N卡全新块 4 个名额全被"贴近史低"占满，
+       涨跌两端一个都进不来）。所以封 2 个，保证后三条一定有机会。
+    """
+    movers = section_movers(rows, limit=1)
+    picked: dict[int, dict] = {}
+
+    def _add(row: dict, reason: str, detail: str) -> None:
+        pid = row.get("product_id")
+        if pid in picked:
+            return
+        picked[pid] = {
+            "product_id": pid,
+            "model": row.get("short_model") or row.get("model"),
+            "full_model": row.get("model"),
+            "brand": row.get("brand"),
+            "reason": reason,
+            "detail": detail,
+            "day_low": row.get("day_low"),
+            "hist_low": row.get("hist_low"),
+            "value_index": row.get("value_index"),
+            "cheapest_platform": (row.get("cheapest_platform") or {}).get("name"),
+            "captured_date": row.get("captured_date"),
+            "is_today": row.get("is_today"),
+            "stale_days": row.get("stale_days"),
+        }
+
+    # 1) 贴近史低（限 2 个名额）
+    near_low = 0
+    for row in sorted(rows, key=lambda r: r.get("day_low") or 1e18):
+        if near_low >= 2 or len(picked) >= limit:
+            break
+        low, hist = row.get("day_low"), row.get("hist_low")
+        if low and hist and low <= hist * WATCH_NEAR_LOW_RATIO:
+            _add(row, "贴近史低", f"日低 {low:,.0f} / 史低 {hist:,.0f}")
+            near_low += 1
+
+    # 2) / 3) 板块内涨跌两端各一
+    for key, reason in (("down", "跌幅最大"), ("up", "涨幅最大")):
+        for mv in movers.get(key, []):
+            src = next((r for r in rows if r.get("product_id") == mv["product_id"]), None)
+            if src is not None:
+                _add(src, reason, f"{mv['change']:+,.0f} 元 @{mv['platform']}")
+        if len(picked) >= limit:
+            return list(picked.values())
+
+    # 4) 性价比最高
+    best = max(
+        (r for r in rows if r.get("value_index")),
+        key=lambda r: r["value_index"],
+        default=None,
+    )
+    if best is not None:
+        _add(best, "性价比最高", f"{best['value_index']:.2f} 分/元")
+    return list(picked.values())[:limit]
+
+
+def split_sections(category: str, basis: str, rows: list[dict], subcategories: list[dict]) -> list[dict]:
+    """把一个 (品类, 品相) 的 rows 按**厂商**拆成独立板块。
+
+    ⚠️ 这是「不跨品牌混排」的唯一实现点 —— 每个板块只拿自己品牌的行，
+       统计 / 涨跌榜 / 重点观察都在这个子集上算。
+       **纯函数、不碰数据库**，所以自检可以直接喂合成数据断言，不必起服务。
+
+    认不出的品牌不会被丢掉，兜进一个「其他」板块 —— 静默吞数据比多一个板块更糟。
+    """
+    by_brand: dict[str, list[dict]] = {}
+    for row in rows:
+        by_brand.setdefault(row.get("brand") or "", []).append(row)
+
+    known = [s.get("code") for s in subcategories]
+    out: list[dict] = []
+    for sub in subcategories:
+        brand = sub.get("code")
+        brand_rows = by_brand.get(brand, [])
+        out.append(
+            {
+                "key": f"{category}|{brand}|{basis}",
+                "category": category,
+                "brand": brand,
+                "brand_label": sub.get("label") or brand,
+                "brand_hint": sub.get("hint") or "",
+                "basis": basis,
+                "basis_label": SECTION_BASIS_LABEL.get(basis, basis),
+                "title": section_title(sub.get("label") or brand, basis),
+                "rows": brand_rows,
+                "empty": not brand_rows,
+                "stats": _row_stats(brand_rows),
+                "movers": section_movers(brand_rows),
+                "watch": section_watch(brand_rows),
+            }
+        )
+
+    leftovers = {b: rs for b, rs in by_brand.items() if b and b not in known}
+    for brand, brand_rows in sorted(leftovers.items()):
+        out.append(
+            {
+                "key": f"{category}|{brand}|{basis}",
+                "category": category,
+                "brand": brand,
+                "brand_label": brand,
+                "brand_hint": "未在子分类矩阵中登记的厂商",
+                "basis": basis,
+                "basis_label": SECTION_BASIS_LABEL.get(basis, basis),
+                "title": section_title(brand, basis),
+                "rows": brand_rows,
+                "empty": False,
+                "stats": _row_stats(brand_rows),
+                "movers": section_movers(brand_rows),
+                "watch": section_watch(brand_rows),
+            }
+        )
+    return out
+
+
+def build_report_matrix(
+    session: Session,
+    days: int = 180,
+    platforms: tuple[str, ...] | None = None,
+    real_only: bool = True,
+    categories: tuple[str, ...] | None = None,
+) -> dict:
+    """板块化日报：品类 × 厂商（N卡/A卡/I卡、IU/AU）× 品相（全新/二手）各自成块。
+
+    ⚠️ 为什么是「每块各调一次 `build_daily_report`」，而不是「算一次再在前端拆」：
+       日低价 / 今日最低平台 / 涨跌幅都是**在平台集合上算出来的**。全新板块的
+       平台集合只有京东 + 拼多多，二手只有闲鱼 —— 若先按全市场算完再拆，
+       全新板块的「日低价」会被闲鱼二手价污染，涨跌幅也会跨品相乱比。
+       所以必须带着各自的平台集合**重新算一遍**。代价是每个品类多跑一遍查询，
+       本地 SQLite + 百级型号，可忽略。
+
+    ⚠️ 也**不复用** basis="all" 的结果：那样拆出来的「全新日低价」是假的。
+    """
+    cats = tuple(categories or REPORT_CATEGORIES)
+    sections: list[dict] = []
+    meta: dict = {"date": None, "newest_batch": "", "batch_count": 0}
+    category_blocks: list[dict] = []
+
+    for category in cats:
+        subs = subcategories_of(category)
+        cat_sections: list[dict] = []
+        for basis, _label in SECTION_BASIS:
+            rep = build_daily_report(
+                session,
+                category=category,
+                days=days,
+                basis=basis,
+                platforms=platforms,
+                real_only=real_only,
+            )
+            for sec in split_sections(category, basis, rep["rows"], subs):
+                sec.update(
+                    {
+                        "category_label": rep["category_label"],
+                        "columns": rep["columns"],
+                        "vendor_colors": rep["vendor_colors"],
+                        "platforms": rep["platforms"],
+                        "coverage": rep["coverage"],
+                        "bench_field": rep["bench_field"],
+                        "date": rep["date"],
+                        "newest_batch": rep["newest_batch"],
+                    }
+                )
+                cat_sections.append(sec)
+                sections.append(sec)
+            if rep["date"] and (meta["date"] is None or rep["date"] > meta["date"]):
+                meta["date"] = rep["date"]
+            if rep["newest_batch"] and rep["newest_batch"] > meta["newest_batch"]:
+                meta["newest_batch"] = rep["newest_batch"]
+            meta["batch_count"] = max(meta["batch_count"], rep["batch_count"])
+
+        category_blocks.append(
+            {
+                "category": category,
+                "category_label": CATEGORIES.get(category, category),
+                "sections": cat_sections,
+                "filled": sum(1 for s in cat_sections if not s["empty"]),
+                "total": len(cat_sections),
+            }
+        )
+
+    return {
+        "date": meta["date"],
+        "newest_batch": meta["newest_batch"],
+        "batch_count": meta["batch_count"],
+        "days": days,
+        "real_only": real_only,
+        "vendor_colors": VENDOR_COLORS,
+        "basis_labels": dict(SECTION_BASIS),
+        "watch_limit": WATCH_LIMIT,
+        "categories": category_blocks,
+        "sections": sections,
     }
 
 

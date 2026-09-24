@@ -734,39 +734,109 @@ table.rpt thead .stick-l { z-index: 4; background: #f7fafe; }
 
 /* ---------------------------------------------------------------- 日报：表头/表尾/对齐 */
 
-/* 表格上方的标题与口径说明（对应参考页面的标题行 + 免责声明行） */
-.rp-cap {
-  padding: 14px 18px 12px;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: .3px;
-  text-align: center;
+/* ---------------------------------------------------------------- 日报：板块化视图 */
+
+/* 板块容器：每个板块 = 标题条 + 涨跌榜/重点观察 + 明细表 */
+.rp-sec {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-xs);
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+.rp-sec.empty { padding: 12px 18px; background: var(--panel-2); box-shadow: none; }
+
+.rp-sec-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  padding: 13px 18px 11px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, #fbfdff 0%, #ffffff 100%);
 }
-.rp-note {
-  padding: 9px 18px;
-  font-size: 11.5px;
-  line-height: 1.85;
-  color: var(--text-2);
+.rp-sec.empty .rp-sec-head { border-bottom: 0; padding: 0; background: none; }
+.rp-sec-title {
+  margin: 0; font-size: 15px; font-weight: 700; letter-spacing: .3px;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.rp-sec-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.rp-sec-hint { font-size: 11.5px; color: var(--text-3); }
+.rp-sec-sub { font-size: 12px; color: var(--text-3); }
+.rp-chips { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px; }
+.rp-chip {
+  font-size: 11px; padding: 2px 8px; border-radius: 20px;
+  background: var(--panel-3); color: var(--text-2); white-space: nowrap;
+}
+.rp-chip.up { background: var(--up-soft); color: var(--up); }
+.rp-chip.down { background: var(--down-soft); color: var(--down); }
+.rp-chip.muted { background: transparent; border: 1px dashed var(--border-strong); color: var(--text-3); }
+
+/* 板块内的两张小卡：涨跌榜 / 重点观察 */
+.rp-sec-cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px; padding: 12px 18px;
   background: var(--panel-2);
   border-bottom: 1px solid var(--border);
 }
-.rp-note b { color: var(--text); font-weight: 600; }
-
-/* 底部结论条（对应参考页面的滚动结论） */
-.rp-foot {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
-  padding: 11px 18px;
-  border-top: 1px solid var(--border);
-  background: var(--panel-2);
-  font-size: 12.5px;
-  color: var(--text-2);
+.rp-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px); padding: 10px 12px;
 }
-.rp-foot b { color: var(--text); font-weight: 600; }
-.rp-foot .up { color: var(--up); }
-.rp-foot .down { color: var(--down); }
-.rp-foot .dot { color: var(--text-3); }
+.rp-card-head {
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  margin-bottom: 8px; display: flex; align-items: baseline; gap: 6px;
+}
+.rp-card-sub { font-size: 10.5px; font-weight: 400; color: var(--text-3); }
+.rp-card-note { margin-top: 7px; font-size: 10.5px; color: var(--text-3); }
+
+.rp-mv-group { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; }
+.rp-mv-group:last-of-type { margin-bottom: 0; }
+.rp-mv-cap {
+  flex: 0 0 auto; width: 18px; height: 18px; border-radius: 5px;
+  font-size: 11px; line-height: 18px; text-align: center; font-weight: 600;
+}
+.rp-mv-cap.up { background: var(--up-soft); color: var(--up); }
+.rp-mv-cap.down { background: var(--down-soft); color: var(--down); }
+.rp-mv-group ul { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-width: 0; }
+.rp-mv {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 2px 0;
+}
+.rp-mv-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text);
+}
+.rp-mv-plat { font-size: 10.5px; color: var(--text-3); flex: 0 0 auto; }
+.rp-mv-empty { font-size: 11.5px; color: var(--text-3); padding: 2px 0; list-style: none; }
+
+.rp-watch-list { list-style: none; margin: 0; padding: 0; }
+.rp-watch {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 12px; padding: 3px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.rp-watch:last-child { border-bottom: 0; }
+.rp-watch-reason {
+  flex: 0 0 auto; font-size: 10.5px; padding: 1px 6px; border-radius: 20px;
+  background: var(--accent-soft); color: var(--accent);
+}
+.rp-watch-model { color: var(--text); font-weight: 500; }
+.rp-watch-detail { font-size: 11px; color: var(--text-3); margin-left: auto; }
+
+/* 板块内的表格沿用 .rpt 的既有样式，只去掉外层圆角（已由 .rp-sec 承担） */
+.rp-sec .table-wrap { border: 0; border-radius: 0; }
+
+/* 标疑徽标：数字照实显示，只是提醒"这条可能不可信" */
+.suspect {
+  color: #c98a00; font-size: 11px; margin-left: 3px; cursor: help;
+}
+
+/* 顶部提示条（多少板块本期无数据） */
+.rp-emptynote {
+  font-size: 11.5px; color: var(--text-2);
+  background: var(--panel-2); border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm, 8px);
+  padding: 8px 12px; margin-bottom: 12px;
+}
 
 /* 对齐工具类 */
 .rpt .al-left { text-align: left; }

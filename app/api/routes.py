@@ -446,6 +446,38 @@ def get_daily_report(
     )
 
 
+@router.get("/daily-report/matrix")
+def get_daily_report_matrix(
+    days: int = Query(180, ge=7, le=730),
+    categories: str | None = Query(None, description="逗号分隔，默认显卡+处理器"),
+    platforms: str | None = Query(None, description="逗号分隔的平台 code，默认重点三平台"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """**板块化**日报：品类 × 厂商（N卡/A卡/I卡、IU/AU）× 品相（全新/二手）各自成块。
+
+    与 `/api/daily-report`（单张大表）的区别在**口径**而非排版：
+
+      · 每块的「日低价 / 今日最低平台 / 涨跌幅」都带着**该块自己的平台集合**
+        重算 —— 全新块只含京东+拼多多，二手块只含闲鱼。先按全市场算完再拆，
+        全新块的日低价会被闲鱼二手价污染。
+      · 「涨跌榜」与「今日重点观察」**只在块内**排序，不跨品牌、不跨品相混排。
+
+    `/api/daily-report` 保持原样不变（向后兼容），本接口是新增的板块视图。
+    """
+    cats = None
+    if categories:
+        cats = tuple(c.strip() for c in categories.split(",") if c.strip())
+        bad = [c for c in cats if c not in report_svc.REPORT_CATEGORIES]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"日报暂不支持该品类：{','.join(bad)}")
+    wanted = None
+    if platforms:
+        wanted = tuple(p.strip() for p in platforms.split(",") if p.strip())
+    return report_svc.build_report_matrix(
+        db, days=days, platforms=wanted, categories=cats
+    )
+
+
 # ---------------------------------------------------------------- 采集管理
 
 @router.get("/admin/status")

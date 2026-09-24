@@ -1358,6 +1358,137 @@ def test_queue_route_filter() -> None:
                 os.environ["DIYPRICE_FOCUS_CATEGORY"] = old_focus
 
 
+def test_report_sections() -> None:
+    """日报板块化：品类 × 厂商 × 品相各自成块，**统计与涨跌榜只在块内**。
+
+    ⚠️ 这里测的是**口径**不是排版：混排会让「涨跌榜」失去解释力
+       （A卡的涨幅把 N卡的行情顶掉、闲鱼二手盖过京东新品）。
+       所以断言写成"板块里的行必须同品牌" + "涨跌榜只来自喂进去的那个子池"，
+       而不是"页面上有几个 div"。
+    """
+    from app.services.report import (
+        SECTION_BASIS,
+        _day_gap,
+        change_basis_label,
+        section_movers,
+        section_watch,
+        split_sections,
+    )
+
+    check("板块品相维度是 全新 + 二手 两档",
+          [b for b, _ in SECTION_BASIS] == ["new", "used"])
+
+    def cell(change, name="京东", real=True, gap=1, suspect=False):
+        return {"name": name, "is_real": real, "change": change,
+                "gap_days": gap, "suspect": suspect, "price": 1000.0, "has_data": True,
+                "change_basis": change_basis_label(gap)}
+
+    def row(pid, model, brand, changes):
+        return {"product_id": pid, "model": model, "short_model": model, "brand": brand,
+                "day_low": 1000.0, "hist_low": None, "value_index": 1.0, "has_real": True,
+                "cheapest_platform": {"name": "京东"}, "platforms": changes,
+                "captured_date": "2026-09-24", "is_today": True, "stale_days": 0}
+
+    rows = [
+        row(1, "RTX 5090 32G", "NVIDIA", [cell(300.0)]),
+        row(2, "RTX 5070 12G", "NVIDIA", [cell(-120.0)]),
+        row(3, "RX 9070 XT 16G", "AMD", [cell(9999.0)]),          # 涨幅远大于 N 卡
+        row(4, "Arc B580 12G", "Intel", [cell(-5.0)]),
+        row(5, "神秘卡 X", "S3", [cell(50.0)]),                    # 未登记的厂商
+    ]
+    subs = [
+        {"code": "NVIDIA", "label": "N卡", "hint": "NVIDIA GeForce"},
+        {"code": "AMD", "label": "A卡", "hint": "AMD Radeon"},
+        {"code": "Intel", "label": "I卡", "hint": "Intel Arc"},
+    ]
+
+    secs = split_sections("gpu", "new", rows, subs)
+    by_key = {s["key"]: s for s in secs}
+    check("板块数 = 子分类数 + 未登记厂商兜底块", len(secs) == 4, f"实际 {[s['title'] for s in secs]}")
+
+    for s in secs:
+        bad = [r["model"] for r in s["rows"] if r["brand"] != s["brand"]]
+        check(f"板块「{s['title']}」只含本品牌的行", not bad, f"混入：{bad}")
+
+    n_sec = by_key["gpu|NVIDIA|new"]
+    check("N卡板块拿到 2 行", len(n_sec["rows"]) == 2)
+    check("N卡板块标题带品相", n_sec["title"] == "N卡 · 全新在售", n_sec["title"])
+
+    # ⚠️ 核心：涨跌榜只在该板块的子池里排。AMD 那条 +9999 绝不能出现在 N 卡榜上。
+    up_models = [m["model"] for m in n_sec["movers"]["up"]]
+    check("N卡涨跌榜不含 A卡型号（不跨品牌混排）",
+          "RX 9070 XT 16G" not in up_models, f"实际 {up_models}")
+    check("N卡涨跌榜就是自己的 +300", up_models == ["RTX 5090 32G"], f"实际 {up_models}")
+    check("N卡跌榜是自己那条 -120",
+          [m["model"] for m in n_sec["movers"]["down"]] == ["RTX 5070 12G"])
+
+    a_sec = by_key["gpu|AMD|new"]
+    check("A卡板块的涨幅榜是自己的 +9999（不是被 N 卡压掉）",
+          [m["model"] for m in a_sec["movers"]["up"]] == ["RX 9070 XT 16G"])
+
+    other = [s for s in secs if s["brand"] == "S3"]
+    check("未登记厂商不被静默丢弃（兜底成独立板块）", len(other) == 1 and len(other[0]["rows"]) == 1)
+
+    # 空板块也要保留（前端才能如实说"本期无数据"，而不是装作没有这一块）。
+    # 注意：没有数据时也就不会有"未登记厂商"的兜底块，所以这里只有子分类那 3 块。
+    empty_secs = split_sections("gpu", "used", [], subs)
+    check("无数据的板块仍然返回（标 empty 而不是消失）",
+          len(empty_secs) == len(subs) and all(s["empty"] for s in empty_secs),
+          f"实际 {[(s['title'], s['empty']) for s in empty_secs]}")
+
+    # ---- 涨跌榜口径：跨天 / 标疑 一律不上榜，但**如实报出条数**
+    mixed = [
+        row(10, "跨天卡", "NVIDIA", [cell(-5000.0, gap=7)]),
+        row(11, "标疑卡", "NVIDIA", [cell(-8000.0, suspect=True)]),
+        row(12, "正常卡", "NVIDIA", [cell(-90.0, gap=1)]),
+        row(13, "模拟卡", "NVIDIA", [cell(-7777.0, name="模拟", real=False)]),
+    ]
+    mv = section_movers(mixed)
+    downs = [m["model"] for m in mv["down"]]
+    check("跨天比较不上涨跌榜", "跨天卡" not in downs, f"实际 {downs}")
+    check("标疑变动不上涨跌榜", "标疑卡" not in downs, f"实际 {downs}")
+    check("模拟平台不上涨跌榜", "模拟卡" not in downs, f"实际 {downs}")
+    check("正常变动照常上榜", downs == ["正常卡"], f"实际 {downs}")
+    check("被排除的条数如实报出（不静默丢）",
+          mv["stale_excluded"] == 1 and mv["suspect_excluded"] == 1,
+          f"stale={mv['stale_excluded']} suspect={mv['suspect_excluded']}")
+    check("榜上条目带平台名与比较基准",
+          mv["down"][0]["platform"] == "京东" and mv["down"][0]["change_basis"] == "日间")
+    # ---- 重点观察：按型号去重、有名额上限、每条带 reason
+    w = section_watch(mixed, limit=4)
+    ids = [x["product_id"] for x in w]
+    check("重点观察按型号去重", len(ids) == len(set(ids)), f"{ids}")
+    check("重点观察不超过名额上限", len(w) <= 4)
+    check("重点观察每条都带 reason（不做黑箱推荐）",
+          all(x.get("reason") for x in w), f"{[x.get('reason') for x in w]}")
+
+    # 贴近史低最多占 2 个名额，否则会把涨跌两端挤光
+    low_rows = [
+        row(20, f"低价卡{i}", "NVIDIA", [cell(0.0)])
+        for i in range(4)
+    ]
+    for r in low_rows:
+        r["hist_low"] = 1000.0        # day_low == hist_low → 全部"贴近史低"
+    w2 = section_watch(low_rows, limit=4)
+    near = [x for x in w2 if x["reason"] == "贴近史低"]
+    check("「贴近史低」最多占 2 个名额（否则挤掉涨跌两端）",
+          len(near) <= 2, f"实际 {len(near)}")
+
+    # ---- 比较跨度标注：日间 / 批次 / 跨N天
+    check("同日 → 0 天", _day_gap("2026-09-24", "2026-09-24") == 0)
+    check("隔一天 → 1 天", _day_gap("2026-09-24", "2026-09-23") == 1)
+    check("跨 6 天（旧的「日间」标签会骗人）", _day_gap("2026-09-22", "2026-09-16") == 6)
+    check("缺日期不炸", _day_gap(None, "2026-09-23") is None
+          and _day_gap("2026-09-24", None) is None)
+    check("日期串畸形不炸（返回 None 而不是抛异常）",
+          _day_gap("not-a-date", "2026-09-23") is None)
+    check("比较基准标签：同批次 → 「批次」", change_basis_label(0) == "批次")
+    check("比较基准标签：隔一天 → 「日间」", change_basis_label(1) == "日间")
+    check("比较基准标签：跨 6 天 → 「跨6天」（不再冒充日间）",
+          change_basis_label(6) == "跨6天")
+    check("比较基准标签：无基准 → None", change_basis_label(None) is None)
+
+
 def test_subcategory_matrix() -> None:
     """厂商二级细分（N卡/A卡/I卡、IU/AU）。
 
@@ -1775,6 +1906,7 @@ def main() -> int:
         test_pdd_home_warmup,
         test_lifecycle_source_routing,
         test_queue_route_filter,
+        test_report_sections,
         test_subcategory_matrix,
         test_watchdog_group_broadcast,
         test_anti_popup_config,

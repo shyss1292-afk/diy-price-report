@@ -1,24 +1,60 @@
-/* 价格日报：按参考表格（显卡日报）1:1 复刻的双行分组表头大表 */
+/* 价格日报 —— 板块化视图
+ *
+ * 结构：品类（显卡/处理器）→ 板块（N卡·全新在售 / N卡·二手流转 / IU / AU …）→ 明细表
+ *
+ * ⚠️ 这里**只负责渲染**。所有「不跨品牌、不跨品相混排」的口径都在后端完成
+ *    （见 app/services/report.py 的 split_sections / section_movers）。
+ *    前端若自己再分组，等于把口径实现两遍，两边迟早会不一致。
+ */
 
 const state = {
   category: 'gpu',
-  basis: 'all',
+  basis: 'all',            // 板块范围：all | new | used（只是显示过滤，不是重新计算）
   days: 180,
   platforms: ['jd', 'pdd', 'xianyu'],
-  report: null,
+  matrix: null,
 };
+
+const BRAND_STYLE = {
+  NVIDIA: { color: '#3a9b3a', label: 'NVIDIA' },
+  AMD: { color: '#d93025', label: 'AMD' },
+  Intel: { color: '#2f6fed', label: 'Intel' },
+};
+
+/* ---------------------------------------------------------------- 小工具 */
+
+function todayIso() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 平台格子的新鲜度徽标：这个价是哪天采的 */
+function cellFresh(cell) {
+  if (!cell.date) return '';
+  return freshBadge({
+    captured_date: cell.date,
+    is_today: cell.date === todayIso(),
+    stale_days: null,
+  });
+}
 
 /* ---------------------------------------------------------------- 单元格渲染 */
 
-/** 涨跌幅：参考表格里是**绝对金额（元）**，不是百分比；用实心红/绿块 + 白字 */
-function changeCell(change, basis) {
+/** 涨跌幅：参考表格里是**绝对金额（元）**；涨红跌绿（中国习惯） */
+function changeCell(change, basis, suspect) {
   if (change === null || change === undefined) return '<span class="na">—</span>';
   const v = Number(change);
   const cls = v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
   const sign = v > 0 ? '+' : '';
   const text = Math.abs(v) >= 100 ? Math.round(v) : v.toFixed(0);
-  const tip = basis === '日间' ? '较上一交易日' : '较上一采集批次';
-  return `<span class="chg ${cls}" title="${tip}">${sign}${text}</span>`;
+  const tip = basis === '日间' ? '较上一交易日'
+    : basis === '批次' ? '较上一采集批次'
+    : basis ? `比较基准跨 ${String(basis).replace('跨', '').replace('天', '')} 天` : '与本平台上一个可比批次相比';
+  const warn = suspect
+    ? '<span class="suspect" title="单批次变动超过 50%，可能是标题匹配错位或引流 SKU —— 数字照实显示，但已排除出涨跌榜">⚠</span>'
+    : '';
+  return `<span class="chg ${cls}" title="${esc(tip)}（单位：元）">${sign}${text}</span>${warn}`;
 }
 
 function priceCell(cell) {
@@ -26,7 +62,7 @@ function priceCell(cell) {
     return '<span class="na">—</span>';
   }
   const flag = cell.is_real ? '' : '<span class="na" title="模拟数据">○</span>';
-  return `<span class="px">${money(cell.price)}</span>${flag}`;
+  return `<span class="px">${money(cell.price)}</span>${flag}${cellFresh(cell)}`;
 }
 
 /* 固定列的渲染器 —— key 与后端 columns 定义一一对应 */
@@ -34,11 +70,11 @@ const RENDERERS = {
   model: (r, rep) => {
     const color = (rep.vendor_colors || {})[r.brand] || 'inherit';
     const sub = r.model !== r.short_model ? `<span class="sub">${esc(r.model)}</span>` : '';
-    return `<span class="mdl" style="color:${color}">${esc(r.short_model)}</span>${sub}`;
+    return `<span class="mdl" style="color:${color}">${esc(r.short_model)}</span>`
+         + freshBadge(r) + sub;
   },
   hist_low: (r, rep) => {
     if (r.hist_low) return `<span class="hist">${money(r.hist_low)}</span>`;
-    // 真实数据天数不足时不显示假低点，但要讲清楚"为什么空、还差多久"
     const cov = (rep && rep.coverage) || {};
     const have = cov.real_days || 0;
     const need = cov.min_days_for_hist || 3;
@@ -77,20 +113,20 @@ const RENDERERS = {
       : '<span class="na">—</span>',
   value_index: (r, rep) => {
     if (!r.value_index) return '<span class="na">—</span>';
-    // 蓝色竖条长度按性价比数值成比例（对照全表最大值），与原版一致
+    // 竖条以**本板块**最大值为基准（板块是独立子池，跨板块比没有意义）
     const max = (rep && rep._maxVi) || r.value_index;
     const ratio = Math.max(0, Math.min(1, r.value_index / max));
-    const width = 8 + ratio * 30;                 // 8~38px
+    const width = 8 + ratio * 30;
     const low = ratio < 0.4 ? ' low' : '';
     return `<span class="vi-cell"><span class="vi-bar${low}" style="width:${width.toFixed(0)}px"></span>`
          + `<span class="vi">${r.value_index.toFixed(2)}</span></span>`;
   },
 };
 
-/* ---------------------------------------------------------------- 渲染 */
+/* ---------------------------------------------------------------- 表格渲染 */
 
-function renderHead(rep) {
-  const cols = rep.columns || [];
+function headHtml(sec) {
+  const cols = sec.columns || [];
   const fixed = cols
     .map((c) => {
       const tip = c.tip ? ` title="${esc(c.tip)}"` : '';
@@ -100,7 +136,7 @@ function renderHead(rep) {
     })
     .join('');
 
-  const groups = rep.platforms
+  const groups = sec.platforms
     .map((p) => {
       const kind = p.is_real ? '<span class="kind">真实</span>' : '<span class="kind">模拟</span>';
       const kd = p.kind === 'used' ? '二手' : '全新';
@@ -109,41 +145,25 @@ function renderHead(rep) {
     })
     .join('');
 
-  const subs = rep.platforms
-    .map(
-      (p) =>
-        `<th class="plat-sub" title="当日最低报价">现价</th>
-         <th class="plat-sub" title="与本平台上一个可比批次相比（单位：元）">涨跌幅</th>`
-    )
+  const subs = sec.platforms
+    .map(() => `<th class="plat-sub" title="当日最低报价">现价</th>
+         <th class="plat-sub" title="与本平台上一个可比批次相比（单位：元）">涨跌幅</th>`)
     .join('');
 
-  // 第一行：固定列（跨两行）+ 平台分组（各跨两列）
-  // 第二行：每个平台下的「现价 / 涨跌幅」
-  document.getElementById('rptHead').innerHTML =
-    `<tr>${fixed}${groups}</tr><tr>${subs}</tr>`;
+  return `<tr>${fixed}${groups}</tr><tr>${subs}</tr>`;
 }
 
-function renderBody(rep) {
-  const body = document.getElementById('rptBody');
-  const cols = rep.columns || [];
+function bodyHtml(sec) {
+  const cols = sec.columns || [];
+  if (!sec.rows.length) return '';
+  sec._maxVi = sec.rows.reduce((m, r) => Math.max(m, r.value_index || 0), 0) || 1;
 
-  // 性价比竖条要以全表最大值为基准，先算出来供渲染器使用
-  rep._maxVi = rep.rows.reduce((m, r) => Math.max(m, r.value_index || 0), 0) || 1;
-
-  if (!rep.rows.length) {
-    body.innerHTML = `<tr><td colspan="${cols.length + rep.platforms.length * 2}">
-      <div class="loading">当前条件下没有可展示的型号<br>
-      <span class="muted">真实数据仍在积累中 —— 用 <code>./scripts/collect_rounds.sh</code> 多跑几轮采集即可补齐</span>
-      </div></td></tr>`;
-    return;
-  }
-
-  body.innerHTML = rep.rows
+  return sec.rows
     .map((r) => {
       const fixed = cols
         .map((c) => {
           const fn = RENDERERS[c.key];
-          const val = fn ? fn(r, rep) : '<span class="na">—</span>';
+          const val = fn ? fn(r, sec) : '<span class="na">—</span>';
           const cls = c.key === 'model' ? 'stick-l al-left model' : `al-${c.align || 'right'}`;
           return `<td class="${cls}">${val}</td>`;
         })
@@ -153,7 +173,7 @@ function renderBody(rep) {
         .map((c) => {
           const cls = `plat-cell${c.is_real ? '' : ' synth'}`;
           return `<td class="${cls} al-right">${priceCell(c)}</td>
-                  <td class="${cls} al-center">${changeCell(c.change, c.change_basis)}</td>`;
+                  <td class="${cls} al-center">${changeCell(c.change, c.change_basis, c.suspect)}</td>`;
         })
         .join('');
 
@@ -162,99 +182,206 @@ function renderBody(rep) {
     .join('');
 }
 
-function renderMeta(rep) {
-  const st = rep.stats || {};
-  const cov = rep.coverage || {};
+/* ---------------------------------------------------------------- 涨跌榜 / 重点观察 */
 
-  document.getElementById('pageDesc').textContent =
-    `${rep.category_label} · ${rep.date || '—'}` +
-    (rep.newest_batch ? ` · 批次 ${rep.newest_batch}` : '') +
-    ` · ${rep.basis_label}`;
+function moversHtml(sec) {
+  const mv = sec.movers || { up: [], down: [] };
+  const line = (list, dir) => {
+    if (!list.length) {
+      return `<li class="rp-mv-empty">本期无可比的${dir === 'up' ? '上涨' : '下跌'}型号</li>`;
+    }
+    return list
+      .map(
+        (m) => `<li class="rp-mv">
+          <span class="rp-mv-name" title="${esc(m.full_model || m.model)}">${esc(m.model)}</span>
+          ${freshBadge(m)}
+          <span class="rp-mv-plat">${esc(m.platform)}</span>
+          <span class="chg ${dir}">${m.change > 0 ? '+' : ''}${Math.round(m.change).toLocaleString('zh-CN')}</span>
+        </li>`
+      )
+      .join('');
+  };
 
-  document.getElementById('rpCaption').textContent =
-    `${rep.category_label}价格每日更新｜${fmtDate(rep.date)}`;
+  const notes = [];
+  if (mv.stale_excluded) notes.push(`已排除 ${mv.stale_excluded} 条跨天比较`);
+  if (mv.suspect_excluded) notes.push(`已排除 ${mv.suspect_excluded} 条标疑变动`);
+  const note = notes.length
+    ? `<div class="rp-card-note" title="跨天比较 = 两个批次相隔 2 天以上，不是今日异动；标疑 = 单批次变动超过 50%，多半是匹配错位或引流 SKU">· ${notes.join(' · ')}</div>`
+    : '';
 
-  const notes = [
-    `注意：只收录 AIC/AIB 品牌，利益无关，<b>不推荐</b>，店铺和价格为当天脚本自动爬取结果（不收录海外版）`,
+  return `<div class="rp-card">
+    <div class="rp-card-head">涨跌榜 <span class="rp-card-sub">本板块内</span></div>
+    <div class="rp-mv-group"><span class="rp-mv-cap up">涨</span><ul>${line(mv.up, 'up')}</ul></div>
+    <div class="rp-mv-group"><span class="rp-mv-cap down">跌</span><ul>${line(mv.down, 'down')}</ul></div>
+    ${note}
+  </div>`;
+}
+
+function watchHtml(sec) {
+  const items = sec.watch || [];
+  const body = items.length
+    ? items
+        .map(
+          (w) => `<li class="rp-watch">
+            <span class="rp-watch-reason">${esc(w.reason)}</span>
+            <span class="rp-watch-model" title="${esc(w.full_model || w.model)}">${esc(w.model)}</span>
+            ${freshBadge(w)}
+            <span class="rp-watch-detail">${esc(w.detail || '')}</span>
+          </li>`
+        )
+        .join('')
+    : '<li class="rp-mv-empty">本期无符合条件的观察项</li>';
+
+  return `<div class="rp-card">
+    <div class="rp-card-head">今日重点观察 <span class="rp-card-sub">本板块内 · 规则见悬停</span></div>
+    <ul class="rp-watch-list" title="按优先级挑：贴近史低（≤史低×1.02，限 2 条）→ 板块内跌幅最大 → 板块内涨幅最大 → 性价比最高；按型号去重">${body}</ul>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------- 板块渲染 */
+
+function visibleSections() {
+  const m = state.matrix;
+  if (!m) return [];
+  const block = (m.categories || []).find((c) => c.category === state.category);
+  if (!block) return [];
+  return (block.sections || []).filter((s) => state.basis === 'all' || s.basis === state.basis);
+}
+
+function sectionHtml(sec) {
+  const st = sec.stats || {};
+  const bs = BRAND_STYLE[sec.brand] || {};
+  const color = bs.color || 'var(--accent)';
+  const plats = (sec.platforms || []).map((p) => p.name).join(' + ') || '—';
+
+  if (sec.empty) {
+    return `<section class="rp-sec empty">
+      <div class="rp-sec-head">
+        <h2 class="rp-sec-title" style="color:${color}">${esc(sec.title)}</h2>
+        <span class="rp-sec-sub">本期无数据（该板块的平台尚未轮巡到型号）</span>
+      </div>
+    </section>`;
+  }
+
+  const chips = [
+    `<span class="rp-chip">${sec.rows.length} 个型号</span>`,
+    `<span class="rp-chip">平台 ${esc(plats)}</span>`,
+    `<span class="rp-chip up">涨 ${st.up || 0}</span>`,
+    `<span class="rp-chip down">跌 ${st.down || 0}</span>`,
+    `<span class="rp-chip">可比 ${st.compared || 0}</span>`,
   ];
-  notes.push(
-    `涨跌幅单位为<b>元</b>，比较基准为同平台上一个可比批次（优先取上一交易日）；` +
-      `「史低价」只统计真实采集数据，模拟数据是程序生成的、不参与历史比较。`
-  );
-  notes.push(
-    `「原价」是本系统自建的<b>基准参考价</b>，非厂商官方指导价；` +
-      `「今日性价比」= 跑分 ÷ 日低价，单位 <b>分/元</b>，越高越划算。`
-  );
-  document.getElementById('rpNote').innerHTML = notes.map((n) => `<div>· ${n}</div>`).join('');
+  if (!st.compared) chips.push('<span class="rp-chip muted">可比批次不足，暂无涨跌</span>');
 
-  document.getElementById('kpiCount').textContent = st.count ?? 0;
-  document.getElementById('kpiCountFoot').textContent = `其中 ${st.real_count ?? 0} 个含真实报价`;
+  return `<section class="rp-sec">
+    <div class="rp-sec-head">
+      <h2 class="rp-sec-title" style="color:${color}">
+        <span class="rp-sec-dot" style="background:${color}"></span>${esc(sec.title)}
+      </h2>
+      <span class="rp-sec-hint">${esc(sec.brand_hint || '')}</span>
+      <div class="rp-chips">${chips.join('')}</div>
+    </div>
+    <div class="rp-sec-cards">${moversHtml(sec)}${watchHtml(sec)}</div>
+    <div class="table-wrap">
+      <table class="rpt">
+        <thead>${headHtml(sec)}</thead>
+        <tbody>${bodyHtml(sec)}</tbody>
+      </table>
+    </div>
+  </section>`;
+}
 
-  const hasCmp = (st.compared || 0) > 0;
-  document.getElementById('kpiUp').textContent = hasCmp ? st.up : '—';
-  document.getElementById('kpiDown').textContent = hasCmp ? st.down : '—';
-  const foot = hasCmp ? '真实平台涨跌' : '可比批次不足，暂无涨跌';
+function renderSections() {
+  const host = document.getElementById('sections');
+  const secs = visibleSections();
+  if (!secs.length) {
+    host.innerHTML = '<div class="panel"><div class="loading">当前条件下没有可展示的板块</div></div>';
+    return;
+  }
+  host.innerHTML = secs.map(sectionHtml).join('');
+}
+
+function renderKpis() {
+  const secs = visibleSections().filter((s) => !s.empty);
+  const count = secs.reduce((n, s) => n + s.rows.length, 0);
+  const real = secs.reduce((n, s) => n + (s.stats.real_count || 0), 0);
+  const up = secs.reduce((n, s) => n + (s.stats.up || 0), 0);
+  const down = secs.reduce((n, s) => n + (s.stats.down || 0), 0);
+  const compared = secs.reduce((n, s) => n + (s.stats.compared || 0), 0);
+
+  const m = state.matrix || {};
+  document.getElementById('kpiCount').textContent = count;
+  document.getElementById('kpiCountFoot').textContent =
+    `${secs.length} 个板块 · 其中 ${real} 个含真实报价`;
+  document.getElementById('kpiUp').textContent = compared ? up : '—';
+  document.getElementById('kpiDown').textContent = compared ? down : '—';
+  const foot = compared ? '各板块内独立统计' : '可比批次不足，暂无涨跌';
   document.getElementById('kpiUpFoot').textContent = foot;
   document.getElementById('kpiDownFoot').textContent = foot;
 
+  const cov = (secs[0] || {}).coverage || {};
   document.getElementById('kpiReal').textContent = cov.real_rows ? `${cov.real_models} 型` : '无';
   document.getElementById('kpiRealFoot').textContent =
     `${cov.real_rows || 0} 条 / ${cov.real_batches || 0} 个批次 / ${cov.real_days || 0} 天`;
 
-  // 结论条（对应参考页面底部滚动的那一句）
-  const parts = [];
-  parts.push(`共 <b>${st.count ?? 0}</b> 个型号入表，<b>${st.real_count ?? 0}</b> 个含真实报价`);
-  if (hasCmp) {
-    parts.push(`真实平台：<b class="up">${st.up}</b> 涨 / <b class="down">${st.down}</b> 跌`);
-  }
-  if (st.biggest_down) {
-    parts.push(
-      `跌幅最大：<b>${esc(st.biggest_down.model)}</b> @${esc(st.biggest_down.platform)} ` +
-        `<span class="down">${Math.round(st.biggest_down.change)} 元</span>`
-    );
-  }
-  if (st.biggest_up) {
-    parts.push(
-      `涨幅最大：<b>${esc(st.biggest_up.model)}</b> @${esc(st.biggest_up.platform)} ` +
-        `<span class="up">+${Math.round(st.biggest_up.change)} 元</span>`
-    );
-  }
-  if (!cov.hist_available) {
-    parts.push(
-      `<span class="muted">真实数据仅覆盖 ${cov.real_days || 0} 天（不足 ${cov.min_days_for_hist} 天），` +
-        `故「史低价」暂不展示；再累积几天即可自动出现</span>`
-    );
-  }
-  document.getElementById('rpFoot').innerHTML = parts
-    .map((p) => `<span>${p}</span>`)
-    .join('<span class="dot">·</span>');
-}
+  const catLabel =
+    ((m.categories || []).find((c) => c.category === state.category) || {}).category_label || '';
+  document.getElementById('pageDesc').textContent =
+    `${catLabel} · ${secs.length} 个板块` +
+    ` · ${m.date || '—'}` +
+    (m.newest_batch ? ` · 批次 ${m.newest_batch}` : '');
 
-function fmtDate(iso) {
-  if (!iso) return '—';
-  const [, m, d] = iso.split('-');
-  return `${Number(m)}月${Number(d)}日`;
+  const empties = secs.filter((s) => s.empty).length;
+  const note = document.getElementById('rpEmptyNote');
+  if (empties) {
+    note.style.display = '';
+    note.textContent = `提示：当前有 ${empties} 个板块本期无数据 —— 反爬源单轮只能采少量型号，靠游标多轮覆盖，属正常现象。`;
+  } else {
+    note.style.display = 'none';
+  }
 }
 
 /* ---------------------------------------------------------------- 交互 */
 
-function renderCatTabs(cats) {
-  const host = document.getElementById('catTabs');
-  host.innerHTML = cats
+function renderTabs(hostId, items, isActive, onPick) {
+  const host = document.getElementById(hostId);
+  host.innerHTML = items
     .map(
-      (c) =>
-        `<button class="tab${c.code === state.category ? ' active' : ''}" data-cat="${c.code}">${esc(
-          c.label
-        )}</button>`
+      (it) =>
+        `<button class="tab${isActive(it) ? ' active' : ''}" data-k="${esc(it.key)}"
+           title="${esc(it.title || '')}">${esc(it.label)}</button>`
     )
     .join('');
   host.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => {
-      state.category = btn.dataset.cat;
+      onPick(btn.dataset.k);
       host.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b === btn));
-      load();
+      rerender();
     });
   });
+}
+
+function renderCatTabs() {
+  const cats = (state.matrix && state.matrix.categories) || [];
+  renderTabs(
+    'catTabs',
+    cats.map((c) => ({ key: c.category, label: c.category_label })),
+    (it) => it.key === state.category,
+    (k) => { state.category = k; }
+  );
+}
+
+function renderBasisTabs() {
+  const labels = (state.matrix && state.matrix.basis_labels) || {};
+  renderTabs(
+    'basisTabs',
+    [
+      { key: 'all', label: '全部板块' },
+      { key: 'new', label: `仅全新（${labels.new || '全新'}）` },
+      { key: 'used', label: `仅二手（${labels.used || '二手'}）` },
+    ],
+    (it) => it.key === state.basis,
+    (k) => { state.basis = k; }
+  );
 }
 
 function renderPlatTabs(plats) {
@@ -270,11 +397,10 @@ function renderPlatTabs(plats) {
     btn.addEventListener('click', () => {
       const code = btn.dataset.code;
       const has = state.platforms.includes(code);
-      if (has && state.platforms.length === 1) return; // 至少留一个
+      if (has && state.platforms.length === 1) return;   // 至少留一个
       state.platforms = has
         ? state.platforms.filter((c) => c !== code)
         : [...state.platforms, code];
-      // 保持后端定义的顺序
       const order = plats.map((p) => p.code);
       state.platforms.sort((a, b) => order.indexOf(a) - order.indexOf(b));
       renderPlatTabs(plats);
@@ -285,53 +411,66 @@ function renderPlatTabs(plats) {
 
 /* ---------------------------------------------------------------- 加载 */
 
+function rerender() {
+  renderSections();
+  renderKpis();
+}
+
 async function load() {
-  const body = document.getElementById('rptBody');
-  body.innerHTML = '<tr><td><div class="loading">加载中…</div></td></tr>';
+  const host = document.getElementById('sections');
+  host.innerHTML = '<div class="panel"><div class="loading">加载中…</div></div>';
   try {
     const qs = new URLSearchParams({
-      category: state.category,
-      basis: state.basis,
       days: state.days,
       platforms: state.platforms.join(','),
     });
-    const rep = await api('/api/daily-report?' + qs.toString());
-    state.report = rep;
-    renderHead(rep);
-    renderBody(rep);
-    renderMeta(rep);
-    document.getElementById('lgBasis').textContent =
-      `涨跌幅单位为元（${rep.bench_field}）`;
+    const m = await api('/api/daily-report/matrix?' + qs.toString());
+    state.matrix = m;
+    renderCatTabs();
+    renderBasisTabs();
+    rerender();
   } catch (err) {
-    body.innerHTML = `<tr><td><div class="loading">加载失败：${esc(err.message)}</div></td></tr>`;
+    host.innerHTML = `<div class="panel"><div class="loading">加载失败：${esc(err.message)}</div></div>`;
   }
 }
 
 /* ---------------------------------------------------------------- 导出 */
 
 function exportCsv() {
-  const rep = state.report;
-  if (!rep || !rep.rows.length) return toast('暂无可导出的数据', true);
-  const head = [
-    ...rep.columns.map((c) => c.label),
-    ...rep.platforms.flatMap((p) => [`${p.name}现价`, `${p.name}涨跌幅`]),
-  ];
-  const lines = [head.join(',')];
-  for (const r of rep.rows) {
-    const fixed = rep.columns.map((c) => {
-      if (c.key === 'model') return r.model;
-      if (c.key === 'cheapest_platform') return r.cheapest_platform ? r.cheapest_platform.name : '';
-      return r[c.key] ?? '';
-    });
-    const plats = r.platforms.flatMap((c) => [c.price ?? '', c.change ?? '']);
-    lines.push(
-      [...fixed, ...plats].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')
-    );
+  const secs = visibleSections().filter((s) => !s.empty);
+  if (!secs.length) return toast('暂无可导出的数据', true);
+
+  const lines = [];
+  for (const sec of secs) {
+    lines.push(`"# ${sec.title}"`);
+    const head = [
+      '板块', '厂商',
+      ...sec.columns.map((c) => c.label),
+      ...sec.platforms.flatMap((p) => [`${p.name}现价`, `${p.name}涨跌幅`, `${p.name}比较基准`]),
+    ];
+    lines.push(head.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+    for (const r of sec.rows) {
+      const fixed = sec.columns.map((c) => {
+        if (c.key === 'model') return r.model;
+        if (c.key === 'cheapest_platform') return r.cheapest_platform ? r.cheapest_platform.name : '';
+        return r[c.key] ?? '';
+      });
+      const plats = r.platforms.flatMap((c) => [
+        c.price ?? '',
+        c.change ?? '',
+        c.change_basis ?? '',
+      ]);
+      lines.push(
+        [sec.title, r.brand, ...fixed, ...plats]
+          .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+          .join(',')
+      );
+    }
   }
   const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `${rep.category_label}价格每日更新_${rep.date}.csv`;
+  a.download = `价格日报_板块化_${(state.matrix || {}).date || 'unknown'}.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
   toast('已导出 CSV');
@@ -340,10 +479,6 @@ function exportCsv() {
 /* ---------------------------------------------------------------- 启动 */
 
 document.addEventListener('DOMContentLoaded', async () => {
-  document.getElementById('basisSelect').addEventListener('change', (e) => {
-    state.basis = e.target.value;
-    load();
-  });
   document.getElementById('daysSelect').addEventListener('change', (e) => {
     state.days = Number(e.target.value);
     load();
@@ -352,14 +487,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btnExport').addEventListener('click', exportCsv);
 
   try {
-    const [cats, plats] = await Promise.all([
-      api('/api/daily-report/categories'),
-      api('/api/daily-report/platforms'),
-    ]);
-    renderCatTabs(cats.items);
+    const plats = await api('/api/daily-report/platforms');
     renderPlatTabs(plats.items);
   } catch (err) {
-    renderCatTabs([{ code: 'gpu', label: '显卡' }, { code: 'cpu', label: '处理器' }]);
+    renderPlatTabs([
+      { code: 'jd', label: '京东' },
+      { code: 'pdd', label: '拼多多' },
+      { code: 'xianyu', label: '闲鱼' },
+    ]);
   }
   load();
 });
