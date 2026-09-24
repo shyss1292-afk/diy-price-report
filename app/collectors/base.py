@@ -83,15 +83,38 @@ def focus_categories() -> set[str] | None:
     return {c.strip() for c in raw.split(",") if c.strip()}
 
 
-def build_rotation(products: list) -> list:
+def build_rotation(products: list, source: str | None = None) -> list:
     """把型号按品类轮流展开成一个线性序列。
 
     这样游标每前进 N 位，取到的就是跨品类均匀分布的一批型号，
     而不是被显卡和 CPU 占满（机箱、电源等品类才不会饿死）。
+
+    Args:
+        source: 采集源 code。传入时按**生命周期路由**过滤：
+
+          停产老硬件（GTX 10/16 系、RTX 20/30 系、RX 5000/6000 系、
+          12 代及更早的 Intel、5000 系及更早的 AMD）在京东/拼多多
+          **已无正品新货** —— 发搜索要么 0 条，要么把「显卡支架」
+          「拆机风扇」这类配件当结果混进来。既占配额又抬风控概率。
+          所以 legacy 型号**只走闲鱼**。
+
+        ⚠️ 源不在 `SOURCE_LIFECYCLES` 里时**不过滤**（宽松兜底）——
+           新增数据源时忘了登记，只是少省一点配额，不会把采集整个断掉。
     """
     wanted = focus_categories()
     if wanted:
         products = [p for p in products if p.category in wanted]
+
+    if source:
+        from ..seed_data import SOURCE_LIFECYCLES, lifecycle_of
+
+        allowed = SOURCE_LIFECYCLES.get(source)
+        if allowed is not None:
+            products = [
+                p
+                for p in products
+                if lifecycle_of(p.model, p.category, p.brand) in allowed
+            ]
 
     buckets: dict[str, list] = {}
     for product in products:
@@ -126,7 +149,7 @@ def pick_targets(products: list, limit: int, source: str | None = None) -> list:
     这是「反爬限流源」的关键设计：单轮只能采少量，靠游标在多轮之间轮转，
     一天跑若干轮就能覆盖全库，而不是每次都重复采同一批型号。
     """
-    ordered = build_rotation(products)
+    ordered = build_rotation(products, source=source)
     if not ordered:
         return []
 

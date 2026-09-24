@@ -46,6 +46,7 @@ SEED = PROJ / "app/seed_data.py"
 ROUTES = PROJ / "app/api/routes.py"
 SERVICE = PROJ / "scripts/service.sh"
 PDD = PROJ / "app/collectors/pdd_source.py"
+BASE = PROJ / "app/collectors/base.py"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
 SCHED = PROJ / "scripts/collect_scheduled.sh"
@@ -191,6 +192,18 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "            if len(matched) >= 1:\n"
         "                return matched[0]\n"
         "        return candidates[0]",
+    ),
+    (
+        "jd 放行 legacy 型号（向京东发老硬件的无效搜索）",
+        SEED,
+        '    "jd": frozenset({LIFECYCLE_ACTIVE}),',
+        '    "jd": frozenset({LIFECYCLE_ACTIVE, LIFECYCLE_LEGACY}),',
+    ),
+    (
+        "轮转忘记按源过滤生命周期（路由形同虚设）",
+        BASE,
+        "    ordered = build_rotation(products, source=source)",
+        "    ordered = build_rotation(products)",
     ),
     (
         "拼多多去掉首页预热（深链搜索触发安全验证，整轮 0 条）",
@@ -340,7 +353,7 @@ def main() -> int:
 
     try:
         for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED,
-                 SESSION, WORKER, TREND, AGGREGATE, SEED, ROUTES, SERVICE, PDD}:
+                 SESSION, WORKER, TREND, AGGREGATE, SEED, ROUTES, SERVICE, PDD, BASE}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak

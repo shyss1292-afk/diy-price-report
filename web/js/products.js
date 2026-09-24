@@ -4,6 +4,7 @@ const state = {
   meta: null,
   items: [],
   category: '',
+  brand: '',
   q: '',
   basis: 'all',
   period: 7,
@@ -50,16 +51,52 @@ function renderChips() {
     // 兜底：拿不到分组就退回平铺
     html = row('', allChip + meta.categories.map(chipOf).join(''));
   }
+
+  // ---- 二级细分：选中某个品类后，再出一行厂商 chip ----
+  //
+  // 显卡拆 N卡/A卡/I卡、处理器拆 IU/AU。只在**已选定一级品类**时出现 ——
+  // 没选品类时「N卡」和「IU」混在一起没有意义。
+  // 品牌 chip 用 `data-brand` 而不是 `data-cat`，点击处理按属性分流，
+  // 否则点「N卡」会把一级品类的选中态一起清掉。
+  if (state.category) {
+    const sub = (meta.subcategories || []).find((g) => g.category === state.category);
+    if (sub && sub.items.length) {
+      const allBrand = `<span class="chip ${state.brand ? '' : 'active'}" data-brand="">全部</span>`;
+      const brandChip = (b) =>
+        `<span class="chip ${state.brand === b.code ? 'active' : ''}" data-brand="${esc(b.code)}" title="${esc(b.hint || '')}">${esc(b.label)} ${b.count}</span>`;
+      html += row('厂商', allBrand + sub.items.map(brandChip).join(''));
+    }
+  }
   host.innerHTML = html;
 
   host.addEventListener('click', (e) => {
     const chip = e.target.closest('.chip');
     if (!chip) return;
-    host.querySelectorAll('.chip').forEach((n) => n.classList.remove('active'));
-    chip.classList.add('active');
-    state.category = chip.dataset.cat;
+    if (chip.dataset.brand !== undefined) {
+      // 品牌行：只重置品牌行内的选中态
+      chip.closest('.chip-row').querySelectorAll('.chip').forEach((n) => n.classList.remove('active'));
+      chip.classList.add('active');
+      state.brand = chip.dataset.brand;
+    } else {
+      // 一级品类行：重置品类行，并**清空品牌**（换品类后旧品牌多半不适用）
+      chip.closest('.chip-row').querySelectorAll('.chip').forEach((n) => n.classList.remove('active'));
+      chip.classList.add('active');
+      state.category = chip.dataset.cat;
+      state.brand = '';
+    }
+    renderChips();
     load();
   });
+}
+
+/** 把品牌 code 转成中文短标签（N卡 / A卡 / IU / AU）。 */
+function subLabel(code) {
+  const subs = (state.meta && state.meta.subcategories) || [];
+  for (const g of subs) {
+    const hit = (g.items || []).find((i) => i.code === code);
+    if (hit) return hit.label;
+  }
+  return code;
 }
 
 async function load() {
@@ -73,6 +110,7 @@ async function load() {
     with_platforms: '1',
   });
   if (state.category) params.set('category', state.category);
+  if (state.brand) params.set('brand', state.brand);
   try {
     const data = await api('/api/products?' + params.toString());
     state.items = data.items;
@@ -140,7 +178,7 @@ function render() {
   const tbody = document.getElementById('tbody');
   document.getElementById('countHint').textContent = `${rows.length} 个型号`;
   document.getElementById('pageDesc').textContent =
-    `${state.category ? (state.meta.categories.find((c) => c.code === state.category) || {}).label : '全部品类'} · 共 ${rows.length} 个型号 · 三平台价格横向对比`;
+    `${state.category ? (state.meta.categories.find((c) => c.code === state.category) || {}).label : '全部品类'}${state.brand ? ' · ' + (subLabel(state.brand) || state.brand) : ''} · 共 ${rows.length} 个型号 · 三平台价格横向对比`;
 
   if (!rows.length) {
     tbody.innerHTML = '<tr><td colspan="10" class="loading">没有符合条件的型号</td></tr>';

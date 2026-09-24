@@ -1153,6 +1153,136 @@ def test_sleep_resistance_and_lock() -> None:
           "cleanup()" in script and "trap cleanup EXIT" in script)
 
 
+def test_lifecycle_source_routing() -> None:
+    """按型号生命周期做采集源路由（2026-09-24）。
+
+    停产老硬件（GTX 10/16 系、RTX 20/30 系、RX 5000/6000 系、12 代及更早的
+    Intel、5000 系及更早的 AMD）在京东/拼多多**已无正品新货** —— 发搜索要么
+    0 条，要么把「显卡支架」「拆机风扇」这类配件当结果混进来。
+    既占配额又抬风控概率。所以 **legacy 型号只走闲鱼**。
+
+    ⚠️ 认不出的型号**一律判 legacy**（保守）：误判成 active 会让 JD/PDD
+       白跑一轮（浪费配额 + 涨风控），误判成 legacy 只是少采两个平台
+       （闲鱼仍覆盖）。两种错误里后者代价小得多。
+    """
+    import os
+
+    from app.collectors.base import build_rotation
+    from app.seed_data import (
+        LIFECYCLE_ACTIVE, LIFECYCLE_LEGACY, SOURCE_LIFECYCLES,
+        lifecycle_of, sources_for,
+    )
+
+    check("jd 只吃 active", SOURCE_LIFECYCLES["jd"] == frozenset({LIFECYCLE_ACTIVE}))
+    check("pdd 只吃 active", SOURCE_LIFECYCLES["pdd"] == frozenset({LIFECYCLE_ACTIVE}))
+    check("xianyu 吃全部", SOURCE_LIFECYCLES["xianyu"] ==
+          frozenset({LIFECYCLE_ACTIVE, LIFECYCLE_LEGACY}))
+
+    cases = [
+        ("RTX 5090 32G", "gpu", "NVIDIA", LIFECYCLE_ACTIVE),
+        ("RTX 4090 24G", "gpu", "NVIDIA", LIFECYCLE_ACTIVE),
+        ("RTX 4090 D 24G", "gpu", "NVIDIA", LIFECYCLE_ACTIVE),
+        ("RTX 3080 10G", "gpu", "NVIDIA", LIFECYCLE_LEGACY),
+        ("RTX 2060 6G", "gpu", "NVIDIA", LIFECYCLE_LEGACY),
+        ("GTX 1060 6G", "gpu", "NVIDIA", LIFECYCLE_LEGACY),
+        ("RX 9070 XT 16G", "gpu", "AMD", LIFECYCLE_ACTIVE),
+        ("RX 7600 8G", "gpu", "AMD", LIFECYCLE_ACTIVE),
+        ("RX 6800 XT 16G", "gpu", "AMD", LIFECYCLE_LEGACY),
+        ("RX 5500 XT 8G", "gpu", "AMD", LIFECYCLE_LEGACY),
+        ("Arc B580 12G", "gpu", "Intel", LIFECYCLE_ACTIVE),
+        ("Arc A750 8G", "gpu", "Intel", LIFECYCLE_LEGACY),
+        ("Ryzen 7 9800X3D", "cpu", "AMD", LIFECYCLE_ACTIVE),
+        ("Ryzen 5 7500F", "cpu", "AMD", LIFECYCLE_ACTIVE),
+        ("Ryzen 7 5800X3D", "cpu", "AMD", LIFECYCLE_LEGACY),
+        ("Core Ultra 9 285K", "cpu", "Intel", LIFECYCLE_ACTIVE),
+        ("i5-14600KF", "cpu", "Intel", LIFECYCLE_ACTIVE),
+        ("i5-13400F", "cpu", "Intel", LIFECYCLE_ACTIVE),
+        ("i5-12400F", "cpu", "Intel", LIFECYCLE_LEGACY),
+        ("i9-12900K", "cpu", "Intel", LIFECYCLE_LEGACY),
+    ]
+    wrong = [(m, lifecycle_of(m, c, b), want)
+             for m, c, b, want in cases if lifecycle_of(m, c, b) != want]
+    check(f"{len(cases)} 个型号的生命周期判定全部正确", not wrong, f"判错：{wrong[:3]}")
+    check("Core Ultra 不能被判成 legacy（先认 Core Ultra 再匹配 i 前缀）",
+          lifecycle_of("Core Ultra 7 270K Plus", "cpu", "Intel") == LIFECYCLE_ACTIVE)
+    check("legacy 型号的采集源只有闲鱼",
+          sources_for("GTX 1060 6G", "gpu", "NVIDIA") == ("xianyu",))
+    check("active 型号走三平台",
+          set(sources_for("RTX 5090 32G", "gpu", "NVIDIA")) == {"jd", "pdd", "xianyu"})
+
+    # 轮转序列里绝不能出现 legacy（这是路由的**唯一**目的）
+    class P:
+        def __init__(self, m, c, b): self.model, self.category, self.brand = m, c, b
+
+    pool = [P(m, c, b) for m, c, b, _ in cases]
+    os.environ["DIYPRICE_FOCUS_CATEGORY"] = "gpu,cpu"
+    try:
+        for src in ("jd", "pdd"):
+            rot = build_rotation(pool, source=src)
+            bad = [p.model for p in rot
+                   if lifecycle_of(p.model, p.category, p.brand) != LIFECYCLE_ACTIVE]
+            check(f"{src} 轮转序列里零 legacy", not bad, f"混入：{bad[:3]}")
+        rot_xy = build_rotation(pool, source="xianyu")
+        check("闲鱼轮转包含 legacy", len(rot_xy) == len(pool))
+        check("未知源不过滤（宽松兜底，不会把采集整个断掉）",
+              len(build_rotation(pool, source="unknown_source")) == len(pool))
+
+        # ⚠️ 光测 `build_rotation` 不够 —— 真正的调用方是 `pick_targets`，
+        #    它忘了把 source 透传下去的话，路由就形同虚设，而上面的断言全绿。
+        #    （反向验证抓到过这条虚守卫。）
+        import inspect as _inspect
+
+        from app.collectors import base as _base
+        check("pick_targets 把 source 透传给 build_rotation",
+              "build_rotation(products, source=source)" in _inspect.getsource(_base.pick_targets))
+
+        # ⚠️ 光测 `build_rotation` 不够 —— 真正的调用方是 `pick_targets`，
+        #    它忘了把 source 透传下去的话，路由就形同虚设，而上面的断言全绿。
+        #    （反向验证抓到过这条虚守卫。）
+        import inspect as _inspect
+
+        from app.collectors import base as _base
+        check("pick_targets 把 source 透传给 build_rotation",
+              "build_rotation(products, source=source)" in _inspect.getsource(_base.pick_targets))
+    finally:
+        os.environ.pop("DIYPRICE_FOCUS_CATEGORY", None)
+
+
+def test_subcategory_matrix() -> None:
+    """厂商二级细分（N卡/A卡/I卡、IU/AU）。
+
+    ⚠️ 用 products 表已有的 `brand` 字段做键，**不新增字段** ——
+       品牌本来就是厂商维度，另造一套只会两处打架。
+    ⚠️ 前端品牌 chip 用 `data-brand` 而非 `data-cat`，点击处理按属性分流，
+       否则点「N卡」会把一级品类的选中态一起清掉。
+    """
+    import inspect
+    import pathlib as _pl
+
+    from app.api import routes
+    from app.seed_data import SUBCATEGORIES, subcategories_of
+
+    check("显卡有 N/A/I 三档", [i["code"] for i in SUBCATEGORIES["gpu"]] == ["NVIDIA", "AMD", "Intel"])
+    check("处理器有 IU/AU 两档", [i["code"] for i in SUBCATEGORIES["cpu"]] == ["Intel", "AMD"])
+    check("未知品类返回空", subcategories_of("nope") == [])
+
+    meta = inspect.getsource(routes.get_meta)
+    check("meta 暴露 subcategories", '"subcategories"' in meta)
+    check("子分类计数按 brand 统计", "brand_counts" in meta)
+    check("子分类计数同样只算 active", "Product.is_active.is_(True)" in meta)
+
+    lp = inspect.getsource(routes.list_products)
+    check("products 接口支持 brand 过滤", "brand: str | None = Query" in lp)
+    check("快照结果也要按 brand 再筛一刀（build_snapshot 是全量快照）",
+          'r.get("brand") or ""' in lp)
+
+    js = (_pl.Path(__file__).resolve().parent.parent / "web" / "js" / "products.js").read_text(encoding="utf-8")
+    check("前端渲染二级 chip", "subcategories" in js and "data-brand" in js)
+    check("点品牌 chip 只重置本行选中态（不清掉一级品类）",
+          "chip.closest('.chip-row')" in js)
+    check("换一级品类时清空品牌", "state.brand = '';" in js)
+
+
 def test_pdd_home_warmup() -> None:
     """拼多多搜索前必须先落地首页（2026-09-24 实测）。
 
@@ -1282,8 +1412,12 @@ def test_scope_gpu_cpu_only() -> None:
           all(k in CATEGORIES for k in ("ram", "ssd", "mb", "psu", "cooler", "case")))
 
     meta = inspect.getsource(routes.get_meta)
-    check("meta 计数过滤 is_active（否则显示 351 而列表只有 130）",
-          "Product.is_active.is_(True)" in meta)
+    # ⚠️ 必须断言**出现次数**，不能只查子串 —— get_meta 里有两处过滤
+    #    （counts 与 brand_counts），只查子串时删掉其中一处断言照样通过。
+    #    （反向验证抓到过这条虚守卫。）
+    check("meta 的两处计数都过滤 is_active（否则显示 351 而列表只有 130）",
+          meta.count("Product.is_active.is_(True)") >= 2,
+          f"实际只出现 {meta.count('Product.is_active.is_(True)')} 次")
 
     sched = (_pl.Path(__file__).resolve().parent / "collect_scheduled.sh").read_text(encoding="utf-8")
     check("采集范围是 gpu,cpu（不含 ram）", "DIYPRICE_FOCUS_CATEGORY=gpu,cpu \\" in sched)
@@ -1529,6 +1663,8 @@ def main() -> int:
         test_browser_launch_defense,
         test_schedule_avoids_commute,
         test_pdd_home_warmup,
+        test_lifecycle_source_routing,
+        test_subcategory_matrix,
         test_watchdog_group_broadcast,
         test_anti_popup_config,
         test_request_slimming_rules,

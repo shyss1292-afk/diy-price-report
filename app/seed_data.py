@@ -322,3 +322,123 @@ def platform_rows() -> list[dict]:
 
 def category_label(code: str) -> str:
     return CATEGORIES.get(code, code)
+
+# ================================================================ 生命周期与采集源路由
+#
+# 为什么需要（2026-09-24）
+# ----------------------
+# 停产老硬件在京东/拼多多**已无正品新货**，只有闲鱼有真实二手成交。
+# 向 JD/PDD 发这些搜索是纯浪费：要么返回 0 条，要么把「显卡支架」「拆机风扇」
+# 这类配件当成结果混进来 —— 既占配额，又抬高被风控的概率。
+#
+# 所以按型号生命周期做**采集源路由**：
+#   active（在售新款）→ jd + pdd + xianyu
+#   legacy（停产老款）→ **只走 xianyu**
+#
+# ⚠️ 这里刻意用**型号名推导**（纯函数）而不是存库字段：
+#    推导规则是确定的、可测的，且改规则后立刻全量生效，不用迁移数据。
+#    代价是每次调用要跑一次正则 —— 量级是百级，可忽略。
+
+LIFECYCLE_ACTIVE = "active"
+LIFECYCLE_LEGACY = "legacy"
+
+# 每个源的采集范围。legacy 型号**绝不进 jd / pdd**。
+SOURCE_LIFECYCLES: dict[str, frozenset[str]] = {
+    "jd": frozenset({LIFECYCLE_ACTIVE}),
+    "pdd": frozenset({LIFECYCLE_ACTIVE}),
+    "xianyu": frozenset({LIFECYCLE_ACTIVE, LIFECYCLE_LEGACY}),
+}
+
+
+def _nvidia_lifecycle(model: str) -> str:
+    """N 卡：RTX 40/50 系在售；RTX 30/20 与 GTX 全系停产。"""
+    m = re.search(r"RTX\s*(\d{2})\d{2}", model)
+    if m:
+        gen = int(m.group(1))
+        return LIFECYCLE_ACTIVE if gen >= 40 else LIFECYCLE_LEGACY
+    return LIFECYCLE_LEGACY          # GTX 10/16 系
+
+
+def _amd_gpu_lifecycle(model: str) -> str:
+    """A 卡：RX 7000/9000 系在售；RX 6000/5000 系停产。"""
+    m = re.search(r"RX\s*(\d)\d{3}", model)
+    if m:
+        return LIFECYCLE_ACTIVE if int(m.group(1)) >= 7 else LIFECYCLE_LEGACY
+    return LIFECYCLE_LEGACY
+
+
+def _intel_gpu_lifecycle(model: str) -> str:
+    """Intel 显卡：Arc B 系（Battlemage）在售；Arc A 系（Alchemist）停产。"""
+    return LIFECYCLE_ACTIVE if re.search(r"Arc\s*B\d", model) else LIFECYCLE_LEGACY
+
+
+def _amd_cpu_lifecycle(model: str) -> str:
+    """AU：Ryzen 7000/8000/9000 系在售；5000 系及更早停产。"""
+    m = re.search(r"Ryzen\s*\d\s*(\d)\d{3}", model)
+    if m:
+        return LIFECYCLE_ACTIVE if int(m.group(1)) >= 7 else LIFECYCLE_LEGACY
+    return LIFECYCLE_LEGACY
+
+
+def _intel_cpu_lifecycle(model: str) -> str:
+    """IU：Core Ultra 与 13/14 代在售；12 代及更早停产。
+
+    ⚠️ 判定顺序有讲究：先认 `Core Ultra`（全新命名，没有 i 前缀），
+       再按 `i[3579]-<代>` 匹配。漏了第一句会把 Core Ultra 全判成 legacy。
+    """
+    if "Core Ultra" in model:
+        return LIFECYCLE_ACTIVE
+    m = re.search(r"i[3579]-(\d{2})\d{2}", model)
+    if m:
+        return LIFECYCLE_ACTIVE if int(m.group(1)) >= 13 else LIFECYCLE_LEGACY
+    return LIFECYCLE_LEGACY
+
+
+_LIFECYCLE_BY_CATEGORY_BRAND = {
+    ("gpu", "NVIDIA"): _nvidia_lifecycle,
+    ("gpu", "AMD"): _amd_gpu_lifecycle,
+    ("gpu", "Intel"): _intel_gpu_lifecycle,
+    ("cpu", "AMD"): _amd_cpu_lifecycle,
+    ("cpu", "Intel"): _intel_cpu_lifecycle,
+}
+
+
+def lifecycle_of(model: str, category: str, brand: str) -> str:
+    """型号的生命周期定位。认不出来的**一律判 legacy**（保守）。
+
+    保守的理由：误判成 active 会让 JD/PDD 白跑一轮（浪费配额 + 涨风控）；
+    误判成 legacy 只是少采两个平台（闲鱼仍然覆盖）。
+    两种错误里后者代价小得多。
+    """
+    fn = _LIFECYCLE_BY_CATEGORY_BRAND.get((category, brand))
+    return fn(model) if fn else LIFECYCLE_LEGACY
+
+
+def sources_for(model: str, category: str, brand: str) -> tuple[str, ...]:
+    """该型号应该走哪些采集源。"""
+    life = lifecycle_of(model, category, brand)
+    return tuple(s for s, allowed in SOURCE_LIFECYCLES.items() if life in allowed)
+
+# ================================================================ 子分类（厂商细分）
+#
+# 显卡按厂商拆 N 卡 / A 卡 / I 卡；处理器拆 Intel(IU) / AMD(AU)。
+# 前端据此渲染二级筛选 chip。
+#
+# ⚠️ 用 `brand` 字段（products 表里已有，值就是 NVIDIA / AMD / Intel）做键，
+#    不再新增字段 —— 品牌本来就是厂商维度，另造一套只会两处打架。
+SUBCATEGORIES: dict[str, list[dict]] = {
+    "gpu": [
+        {"code": "NVIDIA", "label": "N卡", "hint": "NVIDIA GeForce"},
+        {"code": "AMD", "label": "A卡", "hint": "AMD Radeon"},
+        {"code": "Intel", "label": "I卡", "hint": "Intel Arc"},
+    ],
+    "cpu": [
+        {"code": "Intel", "label": "IU", "hint": "Intel 处理器"},
+        {"code": "AMD", "label": "AU", "hint": "AMD 锐龙"},
+    ],
+}
+
+
+def subcategories_of(category: str) -> list[dict]:
+    return SUBCATEGORIES.get(category, [])
+

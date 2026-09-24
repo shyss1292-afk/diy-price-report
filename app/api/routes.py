@@ -13,6 +13,7 @@ from ..db import get_db
 from ..models import CrawlLog, Listing, Platform, PriceDaily, Product
 from ..seed_bench import bench_score
 from ..seed_data import (
+    subcategories_of,
     CATEGORIES,
     CATEGORY_GROUPS,
     CATEGORY_ORDER,
@@ -103,6 +104,14 @@ def get_meta(db: Session = Depends(get_db)) -> dict:
             .group_by(Product.category)
         ).all()
     )
+    brand_counts = {
+        (cat, brand): n
+        for cat, brand, n in db.execute(
+            select(Product.category, Product.brand, func.count(Product.id))
+            .where(Product.is_active.is_(True))
+            .group_by(Product.category, Product.brand)
+        ).all()
+    }
     categories = [
         {
             "code": code,
@@ -116,6 +125,18 @@ def get_meta(db: Session = Depends(get_db)) -> dict:
     return {
         "version": APP_VERSION,
         "categories": categories,
+        # 二级细分：前端据此渲染「N卡 / A卡」「IU / AU」chip。
+        # counts 按 brand 统计，同样只算 active —— 与一级分类口径一致。
+        "subcategories": [
+            {
+                "category": cat,
+                "items": [
+                    {**sub, "count": brand_counts.get((cat, sub["code"]), 0)}
+                    for sub in subcategories_of(cat)
+                ],
+            }
+            for cat in CATEGORY_ORDER
+        ],
         "groups": [
             {**g, "count": sum(counts.get(c, 0) for c in g["categories"])}
             for g in CATEGORY_GROUPS
@@ -194,6 +215,7 @@ def _sort_products(rows: list[dict], sort: str) -> list[dict]:
 @router.get("/products")
 def list_products(
     category: str | None = None,
+    brand: str | None = Query(None, description="厂商细分：NVIDIA / AMD / Intel"),
     group: str | None = Query(None, description="板块分组：core / other"),
     q: str | None = None,
     period: int = Query(1, ge=1, le=90),
@@ -227,6 +249,8 @@ def list_products(
     stmt = select(Product).where(Product.is_active.is_(True))
     if category:
         stmt = stmt.where(Product.category == category)
+    if brand:
+        stmt = stmt.where(Product.brand == brand)
     for p in db.execute(stmt.order_by(Product.id)).scalars():
         if p.id in known:
             continue
@@ -256,6 +280,9 @@ def list_products(
             }
         )
 
+    if brand:
+        # build_snapshot 不过滤品牌（它是全量快照），这里补一刀
+        rows = [r for r in rows if (r.get("brand") or "") == brand]
     if group_codes is not None:
         rows = [r for r in rows if r["category"] in group_codes]
     if q:
