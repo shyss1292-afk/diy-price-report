@@ -1153,6 +1153,29 @@ def test_sleep_resistance_and_lock() -> None:
           "cleanup()" in script and "trap cleanup EXIT" in script)
 
 
+def test_schedule_avoids_commute() -> None:
+    """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
+
+    用户通勤窗口 07:50~08:20 与 17:50~18:20，期间必须断电合盖装包。
+    原来的**整点**调度正好压在窗口上：08:00 那轮在 08:05 被合盖打断，
+    浏览器崩在 `Target page, context or browser has been closed`，
+    闲鱼连续 3 个型号失败提前收工，墙钟 21分43秒（其中 14 分钟在睡）。
+
+    挪到 **30 分**之后：
+      · 07:30 那轮约 12 分钟跑完（~07:42），赶在 07:50 合盖之前
+      · 08:30 那轮在通勤结束、开盖之后才触发，完全避开真空期
+    ⚠️ 07:30 是**新增**的 —— 原来最早的日间轮次是 08:00，正落在窗口里。
+    """
+    import pathlib as _pl
+
+    sh = (_pl.Path(__file__).resolve().parent / "service.sh").read_text(encoding="utf-8")
+    check("触发分钟是 30，不是 0", '<key>Minute</key><integer>30</integer>' in sh)
+    check("没有残留的整点触发", '<key>Minute</key><integer>0</integer>' not in sh)
+    check("新增 07:30 轮次（赶在通勤合盖前跑完）",
+          "for h in 2 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23; do" in sh)
+    check("注释写明了通勤窗口这个原因", "07:50~08:20" in sh and "17:50~18:20" in sh)
+
+
 def test_browser_launch_defense() -> None:
     """浏览器启动前防御：清残留 Singleton 锁 + 回收占端口的僵尸。
 
@@ -1474,6 +1497,7 @@ def main() -> int:
         test_market_hygiene,
         test_scope_gpu_cpu_only,
         test_browser_launch_defense,
+        test_schedule_avoids_commute,
         test_watchdog_group_broadcast,
         test_anti_popup_config,
         test_request_slimming_rules,

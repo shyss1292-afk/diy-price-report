@@ -95,9 +95,23 @@ write_collect_plist() {
     <key>StartCalendarInterval</key>
     <array>
 PLIST
-    # 每小时整点（02:00 顺带做当日全量打底）
-    for h in 2 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23; do
-      echo "        <dict><key>Hour</key><integer>${h}</integer><key>Minute</key><integer>0</integer></dict>"
+    # 每小时 **30 分**触发（02:30 顺带做当日全量打底）。
+    #
+    # 为什么不是整点（2026-09-24 改）
+    # ------------------------------
+    # 用户的通勤窗口是 **07:50~08:20** 与 **17:50~18:20**，期间必须断电合盖装包。
+    # 整点调度刚好正中窗口：08:00 那轮在 08:05 被合盖打断，
+    # 浏览器崩在 `Target page, context or browser has been closed`，
+    # 闲鱼连续 3 个型号失败提前收工，墙钟被拉到 21 分 43 秒（其中 14 分钟在睡）。
+    #
+    # 挪到 30 分之后：
+    #   · 07:30 那轮约 12 分钟跑完（~07:42），**赶在 07:50 合盖之前**
+    #   · 08:30 那轮在通勤结束、开盖之后才触发，**完全避开真空期**
+    #   · 17:30 / 18:30 同理
+    #
+    # ⚠️ 07:30 是**新增**的 —— 原来最早的日间轮次是 08:00，正好落在合盖窗口里。
+    for h in 2 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23; do
+      echo "        <dict><key>Hour</key><integer>${h}</integer><key>Minute</key><integer>30</integer></dict>"
     done
     cat <<PLIST
     </array>

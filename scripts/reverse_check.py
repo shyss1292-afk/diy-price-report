@@ -44,6 +44,7 @@ TREND = PROJ / "app/services/trend.py"
 AGGREGATE = PROJ / "app/services/aggregate.py"
 SEED = PROJ / "app/seed_data.py"
 ROUTES = PROJ / "app/api/routes.py"
+SERVICE = PROJ / "scripts/service.sh"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
 SCHED = PROJ / "scripts/collect_scheduled.sh"
@@ -191,6 +192,12 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "        return candidates[0]",
     ),
     (
+        "触发时间退回整点（正好压在通勤合盖窗口上）",
+        SERVICE,
+        '<key>Minute</key><integer>30</integer>',
+        '<key>Minute</key><integer>0</integer>',
+    ),
+    (
         "清残留锁时不检查活跃进程（会删掉正在运行实例的锁）",
         SESSION,
         "    if profile_pids(profile):\n        return []          # 有活跃进程，锁是有效的，绝不能碰",
@@ -326,7 +333,7 @@ def main() -> int:
 
     try:
         for path in {BREAKER, PIPELINE, BASE, DB, PROBE, SEED, CLEAN, NORMALIZE, SCHED,
-                 SESSION, WORKER, TREND, AGGREGATE, SEED, ROUTES}:
+                 SESSION, WORKER, TREND, AGGREGATE, SEED, ROUTES, SERVICE}:
             bak = tmpdir / path.name
             shutil.copy2(path, bak)
             backups[path] = bak
