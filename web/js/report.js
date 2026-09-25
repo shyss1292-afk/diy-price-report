@@ -84,6 +84,32 @@ const RENDERERS = {
   day_low: (r) =>
     `<span class="daylow">${money(r.day_low)}</span>` +
     (r.day_low_is_real ? '<span class="real-dot" title="真实采集">●</span>' : ''),
+  /* 均价：均价 + 近 8 个交易日走势 + 有效样本数（规格要求三项都透出） */
+  day_avg: (r) => {
+    if (r.day_avg === null || r.day_avg === undefined) return '<span class="na">—</span>';
+    const t = r.avg_trend || {};
+    const vals = (t.avg || []).filter((v) => v !== null && v !== undefined);
+    const spark = vals.length >= 2
+      ? `<span class="spark-wrap" title="近 ${vals.length} 个交易日均价走势（${(t.dates || [])[0] || '?'} → ${(t.dates || [])[vals.length - 1] || '?'}）">`
+        + sparkline(vals, { width: 56, height: 16 }) + '</span>'
+      : '';
+    const n = r.day_samples
+      ? `<span class="sub">${r.day_samples} 条样本</span>`
+      : '<span class="sub muted">无样本</span>';
+    return `<span class="avg">${money(r.day_avg)}</span>${spark}${n}`;
+  },
+  /* 日环比：涨跌额（元）+ 幅度（%），口径 = 最低价平台 */
+  day_change: (r) => {
+    if (r.day_change === null || r.day_change === undefined) return '<span class="na">—</span>';
+    const v = Number(r.day_change);
+    const cls = v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
+    const amt = `${v > 0 ? '+' : ''}${Math.round(v).toLocaleString('zh-CN')}`;
+    const p = r.day_change_pct;
+    const pct = (p === null || p === undefined)
+      ? ''
+      : `<span class="sub ${cls}">${p > 0 ? '+' : ''}${Number(p).toFixed(2)}%</span>`;
+    return `<span class="chg ${cls}" title="最低价平台相对上一批次（单位：元）">${amt}</span>${pct}`;
+  },
   base_price: (r) => {
     const sub =
       r.vs_base_pct === null
@@ -248,6 +274,10 @@ function visibleSections() {
   return (block.sections || []).filter((s) => state.basis === 'all' || s.basis === state.basis);
 }
 
+function secDomId(sec) {
+  return 'sec-' + String(sec.key).replace(/\|/g, '-');
+}
+
 function sectionHtml(sec) {
   const st = sec.stats || {};
   const bs = BRAND_STYLE[sec.brand] || {};
@@ -255,7 +285,7 @@ function sectionHtml(sec) {
   const plats = (sec.platforms || []).map((p) => p.name).join(' + ') || '—';
 
   if (sec.empty) {
-    return `<section class="rp-sec empty">
+    return `<section class="rp-sec empty" id="${secDomId(sec)}">
       <div class="rp-sec-head">
         <h2 class="rp-sec-title" style="color:${color}">${esc(sec.title)}</h2>
         <span class="rp-sec-sub">本期无数据（该板块的平台尚未轮巡到型号）</span>
@@ -272,7 +302,7 @@ function sectionHtml(sec) {
   ];
   if (!st.compared) chips.push('<span class="rp-chip muted">可比批次不足，暂无涨跌</span>');
 
-  return `<section class="rp-sec">
+  return `<section class="rp-sec" id="${secDomId(sec)}">
     <div class="rp-sec-head">
       <h2 class="rp-sec-title" style="color:${color}">
         <span class="rp-sec-dot" style="background:${color}"></span>${esc(sec.title)}
@@ -288,6 +318,36 @@ function sectionHtml(sec) {
       </table>
     </div>
   </section>`;
+}
+
+/* 锚点导航：按品类分组，点一下直接跳到对应板块 */
+function renderAnchorNav() {
+  const host = document.getElementById('anchorNav');
+  const secs = visibleSections();
+  if (secs.length <= 1) {
+    host.style.display = 'none';
+    return;
+  }
+  host.style.display = '';
+  const byCat = new Map();
+  for (const s of secs) {
+    if (!byCat.has(s.category_label)) byCat.set(s.category_label, []);
+    byCat.get(s.category_label).push(s);
+  }
+  host.innerHTML = [...byCat.entries()]
+    .map(
+      ([cat, list]) =>
+        `<span class="an-cat">${esc(cat)}大盘</span>` +
+        list
+          .map(
+            (s) =>
+              `<a class="an-link${s.empty ? ' empty' : ''}" href="#${secDomId(s)}"
+                 title="${esc(s.title)}${s.empty ? '（本期无数据）' : ` · ${s.rows.length} 个型号`}"
+               >${esc(s.title)}</a>`
+          )
+          .join('')
+    )
+    .join('<span class="an-sep"></span>');
 }
 
 function renderSections() {
@@ -412,6 +472,7 @@ function renderPlatTabs(plats) {
 /* ---------------------------------------------------------------- 加载 */
 
 function rerender() {
+  renderAnchorNav();
   renderSections();
   renderKpis();
 }

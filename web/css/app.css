@@ -830,6 +830,31 @@ table.rpt thead .stick-l { z-index: 4; background: #f7fafe; }
   color: #c98a00; font-size: 11px; margin-left: 3px; cursor: help;
 }
 
+/* 均价单元格：均价 + 走势迷你图 + 样本数 */
+.rp-sec .avg { font-weight: 600; }
+.rp-sec .spark-wrap { display: inline-block; margin-left: 5px; vertical-align: -3px; }
+.rp-sec .spark-wrap .spark { display: block; }
+.rp-sec td .sub.up { color: var(--up); }
+.rp-sec td .sub.down { color: var(--down); }
+
+/* 锚点导航 */
+.anchor-nav {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+  padding: 9px 13px; margin-bottom: 12px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-xs);
+  font-size: 11.5px;
+  position: sticky; top: 0; z-index: 5;
+}
+.anchor-nav .an-cat { font-weight: 600; color: var(--text-2); margin-right: 2px; }
+.anchor-nav .an-link {
+  color: var(--text-2); text-decoration: none;
+  padding: 2px 8px; border-radius: 20px; background: var(--panel-3);
+}
+.anchor-nav .an-link:hover { background: var(--accent-soft); color: var(--accent); }
+.anchor-nav .an-link.empty { opacity: .5; }
+.anchor-nav .an-sep { width: 1px; height: 14px; background: var(--border-strong); margin: 0 4px; }
+
 /* 顶部提示条（多少板块本期无数据） */
 .rp-emptynote {
   font-size: 11.5px; color: var(--text-2);

@@ -51,7 +51,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import Listing, Platform, Product
+from ..models import Listing, Platform, PriceDaily, Product
 from ..seed_bench import bench_label, bench_score, bench_tooltip
 from ..seed_data import CATEGORIES, subcategories_of
 from .brands import clean_title, guess_brand, short_model
@@ -87,6 +87,10 @@ _COLUMN_SPECS: dict[str, list[dict]] = {
         {"key": "model", "label": "显卡", "align": "left", "width": 150},
         {"key": "hist_low", "label": "史低价", "align": "right", "tip": "统计窗口内最低的真实报价"},
         {"key": "day_low", "label": "日低价", "align": "right", "tip": "最新批次的最低报价"},
+        {"key": "day_avg", "label": "均价", "align": "right",
+         "tip": "各平台代表报价的算术平均（与「日低价」同一组候选），下方为近 8 个交易日走势与有效样本数"},
+        {"key": "day_change", "label": "日环比", "align": "right",
+         "tip": "最低价平台相对上一批次的涨跌额（元）与幅度（%）；跨天比较不参与涨跌榜"},
         {"key": "base_price", "label": "原价", "align": "right",
          "tip": "本系统自建的基准参考价，非厂商官方指导价"},
         {"key": "bench", "label": "TSE跑分", "align": "right", "tip": "3DMark Time Spy Extreme 参考值"},
@@ -101,6 +105,10 @@ _COLUMN_SPECS: dict[str, list[dict]] = {
         {"key": "model", "label": "CPU", "align": "left", "width": 150},
         {"key": "hist_low", "label": "史低价", "align": "right", "tip": "统计窗口内最低的真实报价"},
         {"key": "day_low", "label": "日低价", "align": "right", "tip": "最新批次的最低报价"},
+        {"key": "day_avg", "label": "均价", "align": "right",
+         "tip": "各平台代表报价的算术平均（与「日低价」同一组候选），下方为近 8 个交易日走势与有效样本数"},
+        {"key": "day_change", "label": "日环比", "align": "right",
+         "tip": "最低价平台相对上一批次的涨跌额（元）与幅度（%）；跨天比较不参与涨跌榜"},
         {"key": "cheapest_platform", "label": "今日最低平台", "align": "left"},
         {"key": "cheapest_shop", "label": "店铺", "align": "left"},
         {"key": "bench", "label": "R23跑分", "align": "right", "tip": "Cinebench R23 多核参考值"},
@@ -161,6 +169,24 @@ def change_basis_label(gap: int | None) -> str | None:
     if gap == 1:
         return "日间"
     return f"跨{gap}天"
+
+
+def platforms_for_basis(platforms: list, basis: str) -> list:
+    """按**品相**筛平台 —— 「全新 / 二手数据源隔离」的唯一实现点。
+
+      · `new`  → 只留 `kind == "new"`（京东 / 拼多多）
+      · `used` → 只留 `kind == "used"`（闲鱼）
+      · `all`  → 不过滤
+
+    ⚠️ 抽成纯函数是为了能被自检**直接断言**（喂几个带 kind 的替身即可），
+       不必起服务、不必连数据库。数据源隔离是本次分板块重构的核心契约，
+       靠"看代码觉得对"是不够的 —— 两个集合必须不相交，且各自只含本类。
+    """
+    if basis == "new":
+        return [p for p in platforms if p.kind == "new"]
+    if basis == "used":
+        return [p for p in platforms if p.kind == "used"]
+    return list(platforms)
 
 
 def _platform_filter(basis: str):
@@ -226,10 +252,9 @@ def build_daily_report(
         ).scalars()
     ]
     by_code = {p.code: p for p in plat_rows}
-    platforms_sel = [by_code[c] for c in wanted if c in by_code]
-    if basis != "all":
-        want_kind = "new" if basis == "new" else "used"
-        platforms_sel = [p for p in platforms_sel if p.kind == want_kind]
+    platforms_sel = platforms_for_basis(
+        [by_code[c] for c in wanted if c in by_code], basis
+    )
     if not platforms_sel:
         return _empty_report(category, basis)
 
@@ -358,11 +383,20 @@ def build_daily_report(
             )
 
     # ---- 稳健取价：每个 (型号, 平台, 血缘) 得到 {批次: 代表报价}
+    #
+    # ⚠️ 代表报价之外，同时带上这一组的**均价与有效样本数** —— 它们是日报卡片
+    #    必须透出的字段（「当前最低价 / 均价 / 样本数」），而且必须是**同一批**
+    #    原始报价算出来的，不能事后另取一份（那会和代表报价对不上）。
+    #    均价用算术平均（含被 `_pick_representative` 剔掉的引流 SKU）——
+    #    剔除只服务于"最低价"这个口径，均价要反映真实挂价分布。
     price_by_batch: dict[tuple[int, int, bool], dict[str, dict]] = {}
     for (pid, plat_id, batch, synth), rows in raw_by_group.items():
         best = _pick_representative(rows)
         if best is not None:
-            price_by_batch.setdefault((pid, plat_id, synth), {})[batch] = best
+            det = dict(best)
+            det["avg"] = statistics.mean(r["price"] for r in rows)
+            det["count"] = len(rows)
+            price_by_batch.setdefault((pid, plat_id, synth), {})[batch] = det
 
     batch_rank = {b: i for i, b in enumerate(batches)}   # 越小越新
     newest_batch = batches[0] if batches else ""
@@ -425,7 +459,16 @@ def build_daily_report(
                     "kind": plat.kind,
                     "is_real": plat.code in REAL_PLATFORMS,
                     "price": _r(price),
+                    "avg_price": _r(det.get("avg")),
+                    "sample_count": det.get("count"),
                     "change": _r(change),
+                    # 日环比涨跌幅（%）—— 规格要求「涨跌额/幅」两个都要透出。
+                    # 分母用上一批次价，prev 为 0 时不给（避免除零编出 inf）。
+                    "change_pct": (
+                        _r(change / prev * 100.0, 2)
+                        if (change is not None and prev)
+                        else None
+                    ),
                     # ⚠️ 三档而不是两档：同批次（日内）、隔一天（真日间）、跨多天。
                     #    「跨 N 天」这一档以前被错标成「日间」，会把陈年价差当今日异动。
                     "change_basis": (
@@ -468,6 +511,31 @@ def build_daily_report(
         hist = hist_low.get(product.id)
         title = best_det.get("title", "")
 
+        # ---- 卡片必须透出的聚合指标 ----------------------------------------
+        #
+        # 均价 / 样本数与「日低价」取**同一组候选**（各平台的代表报价），
+        # 口径才自洽：最低价是这组里的最小值，均价是这组的算术平均。
+        # 若改成"把各平台原始报价全堆起来算平均"，样本多的平台会压倒样本少的
+        # （闲鱼一轮 30 条、京东 2 条），均价就变成"闲鱼均价"了。
+        day_avg = statistics.mean(c[0] for c in candidates) if candidates else None
+        day_samples = sum(int(c[2].get("count") or 0) for c in candidates) or None
+
+        # 行级涨跌额/幅 = **最低价那个平台**的涨跌（与「今日最低平台」同源，
+        # 不会出现"最低价来自闲鱼、涨跌幅却来自京东"的错配）。
+        best_cell = next((c for c in cells if c["code"] == (best_plat.code if best_plat else "")), None)
+        row_change = best_cell["change"] if best_cell else None
+        row_change_pct = best_cell["change_pct"] if best_cell else None
+
+        # 性价比异动 = 性价比（跑分÷日低价）相对上一批次的变化。
+        # 日低价跌 → 性价比升，所以它的符号与价格涨跌相反，是独立指标。
+        prev_low = best_cell["prev_price"] if best_cell else None
+        vi_prev = _r(bench / prev_low, 2) if (bench and prev_low) else None
+        vi_change = (
+            _r(value_index - vi_prev, 2)
+            if (value_index is not None and vi_prev is not None)
+            else None
+        )
+
         # 该行**最新**的一个平台批次日期 —— 只要有一个平台今天是新采的，
         # 这一行就不该被标成「昨日」。字段名与 trend.build_snapshot 对齐，
         # 否则 common.js 的 freshBadge() 认不出来（见下方行内注释）。
@@ -481,6 +549,10 @@ def build_daily_report(
                 "model": product.model,
                 "short_model": short_model(product.model, product.category),
                 "brand": product.brand,
+                # 规格里的厂商码是小写（nvidia / amd / intel）。**不改 `brand`** ——
+                # `/products` 页的品牌 chip 用的是 data-brand，值必须与 products.brand
+                # 一致；这里另给一个小写码供外部消费方使用。
+                "brand_code": (product.brand or "").lower(),
                 "spec": product.spec,
                 "base_price": _r(product.base_price),
                 "vs_base_pct": _r((day_low - product.base_price) / product.base_price * 100.0)
@@ -492,8 +564,15 @@ def build_daily_report(
                 else None,
                 "day_low": _r(day_low),
                 "day_low_is_real": not best_det.get("synthetic", False),
+                # 卡片要求的「当前最低价 / 均价 / 日环比涨跌额幅 / 有效样本数」
+                "day_avg": _r(day_avg),
+                "day_samples": day_samples,
+                "day_change": _r(row_change),
+                "day_change_pct": row_change_pct,
                 "bench": bench,
                 "value_index": value_index,
+                "value_index_prev": vi_prev,
+                "value_index_change": vi_change,
                 "cheapest_platform": {
                     "code": best_plat.code,
                     "name": PLATFORM_LABELS.get(best_plat.code, best_plat.name),
@@ -524,6 +603,11 @@ def build_daily_report(
             }
         )
 
+    # ---- 均价走势：按**本板块的平台集合**取（见 _avg_trends 的两条注意）
+    trends = _avg_trends(session, pids, plat_ids, latest_date)
+    for row in rows:
+        row["avg_trend"] = trends.get(row["product_id"])
+
     return {
         "category": category,
         "category_label": CATEGORIES.get(category, category),
@@ -552,6 +636,56 @@ def build_daily_report(
         "stats": _row_stats(rows),
         "rows": rows,
     }
+
+
+# 均价走势取多少个交易日
+TREND_DAYS = 8
+# 往前捞多少自然日（交易日之间有间隔，留足余量才能凑够 TREND_DAYS 个点）
+TREND_LOOKBACK_DAYS = 21
+
+
+def _avg_trends(
+    session: Session, pids: list[int], plat_ids: list[int], latest_date
+) -> dict[int, dict]:
+    """每个型号在**给定平台集合内**的近 N 个交易日走势（均价 / 最低价 / 样本数）。
+
+    ⚠️ 走 `price_daily`（行情底座）而不是重扫 `listings`：底座在写入时已经按
+       `is_synthetic` / `Platform.is_active` / `Product.is_active` 过滤过一遍
+       （见 services/aggregate.py），口径与"行情"一致，也不会把模拟数据混进走势。
+
+    ⚠️ 平台集合必须用**调用方的** plat_ids —— 全新板块的走势里不能出现闲鱼价，
+       否则「均价走势」就成了跨品相的混合物，与分板块的初衷相悖。
+    """
+    since = latest_date - timedelta(days=TREND_LOOKBACK_DAYS)
+    series: dict[int, list] = {}
+    for pid, d, avg, lo, cnt in session.execute(
+        select(
+            PriceDaily.product_id,
+            PriceDaily.trade_date,
+            func.avg(PriceDaily.avg_price),
+            func.min(PriceDaily.min_price),
+            func.sum(PriceDaily.sample_count),
+        )
+        .where(
+            PriceDaily.product_id.in_(pids),
+            PriceDaily.platform_id.in_(plat_ids),
+            PriceDaily.trade_date >= since,
+        )
+        .group_by(PriceDaily.product_id, PriceDaily.trade_date)
+        .order_by(PriceDaily.product_id, PriceDaily.trade_date)
+    ).all():
+        series.setdefault(pid, []).append((d, avg, lo, cnt))
+
+    out: dict[int, dict] = {}
+    for pid, points in series.items():
+        points = points[-TREND_DAYS:]
+        out[pid] = {
+            "dates": [d.isoformat() for d, _, _, _ in points],
+            "avg": [_r(a) for _, a, _, _ in points],
+            "low": [_r(lo) for _, _, lo, _ in points],
+            "samples": [int(c or 0) for _, _, _, c in points],
+        }
+    return out
 
 
 def _coverage(session: Session, pids: list[int], plat_ids: list[int]) -> dict:
@@ -668,8 +802,10 @@ SECTION_BASIS: tuple[tuple[str, str], ...] = (
 )
 SECTION_BASIS_LABEL = dict(SECTION_BASIS)
 
-# 板块内「今日重点观察」：最多挑几条
-WATCH_LIMIT = 4
+# 板块内「今日重点观察」：最多挑几条。
+# 5 而不是 4 —— 规则有 5 条（贴近史低 / 跌幅最大 / 涨幅最大 / 性价比异动 /
+# 性价比最高），限 4 会让最后一条永远排不上。
+WATCH_LIMIT = 5
 # 判「贴近史低」的容差（日低价 ≤ 史低价 × 该系数）
 WATCH_NEAR_LOW_RATIO = 1.02
 
@@ -765,7 +901,8 @@ def section_watch(rows: list[dict], limit: int = WATCH_LIMIT) -> list[dict]:
       1. `贴近史低` —— 日低价 ≤ 史低价 × 1.02（且史低价可用），**最多占 2 个名额**
       2. `跌幅最大` —— 板块内单平台跌幅最大的那个（< 0）
       3. `涨幅最大` —— 板块内单平台涨幅最大的那个（> 0）
-      4. `性价比最高` —— value_index 最大（CPU 表无此列，自动跳过）
+      4. `性价比异动` —— |性价比变化| 最大的那个（跑分÷日低价相对上一批次）
+      5. `性价比最高` —— value_index 最大（CPU 表无此列，自动跳过）
 
     每条都带 `reason`，前端直接透出 —— 不做「黑箱推荐」。
 
@@ -815,7 +952,24 @@ def section_watch(rows: list[dict], limit: int = WATCH_LIMIT) -> list[dict]:
         if len(picked) >= limit:
             return list(picked.values())
 
-    # 4) 性价比最高
+    # 4) 性价比异动：性价比 = 跑分 ÷ 日低价，日低价跌 → 性价比升。
+    #    它的符号与价格涨跌**相反**，是独立指标，不能拿涨跌幅代替。
+    vi_moved = max(
+        (r for r in rows if r.get("value_index_change")),
+        key=lambda r: abs(r["value_index_change"]),
+        default=None,
+    )
+    if vi_moved is not None:
+        _add(
+            vi_moved,
+            "性价比异动",
+            f"{vi_moved['value_index_prev']:.2f} → {vi_moved['value_index']:.2f}"
+            f"（{vi_moved['value_index_change']:+.2f}）",
+        )
+    if len(picked) >= limit:
+        return list(picked.values())
+
+    # 5) 性价比最高
     best = max(
         (r for r in rows if r.get("value_index")),
         key=lambda r: r["value_index"],
@@ -849,6 +1003,7 @@ def split_sections(category: str, basis: str, rows: list[dict], subcategories: l
                 "key": f"{category}|{brand}|{basis}",
                 "category": category,
                 "brand": brand,
+                "brand_code": (brand or "").lower(),
                 "brand_label": sub.get("label") or brand,
                 "brand_hint": sub.get("hint") or "",
                 "basis": basis,
@@ -869,6 +1024,7 @@ def split_sections(category: str, basis: str, rows: list[dict], subcategories: l
                 "key": f"{category}|{brand}|{basis}",
                 "category": category,
                 "brand": brand,
+                "brand_code": (brand or "").lower(),
                 "brand_label": brand,
                 "brand_hint": "未在子分类矩阵中登记的厂商",
                 "basis": basis,

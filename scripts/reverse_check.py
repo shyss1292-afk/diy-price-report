@@ -240,6 +240,12 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         '        return "日间"\n    return "日间"',
     ),
     (
+        "全新口径不再按平台品相过滤（闲鱼二手价混进「全新在售」板块）",
+        REPORT,
+        '        return [p for p in platforms if p.kind == "new"]',
+        "        return list(platforms)",
+    ),
+    (
         "拼多多去掉首页预热（深链搜索触发安全验证，整轮 0 条）",
         PDD,
         'if "search_result" not in (page.url or ""):',

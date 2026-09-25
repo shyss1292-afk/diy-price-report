@@ -1370,6 +1370,7 @@ def test_report_sections() -> None:
         SECTION_BASIS,
         _day_gap,
         change_basis_label,
+        platforms_for_basis,
         section_movers,
         section_watch,
         split_sections,
@@ -1378,16 +1379,47 @@ def test_report_sections() -> None:
     check("板块品相维度是 全新 + 二手 两档",
           [b for b, _ in SECTION_BASIS] == ["new", "used"])
 
+    # ---- 契约①：全新 / 二手 的**数据源隔离** ------------------------------
+    # 这是本次分板块重构的核心契约：全新只吃京东+拼多多，二手只吃闲鱼。
+    # 抽成纯函数就是为了能在这里直接断言，而不是"看代码觉得对"。
+    class Plat:
+        def __init__(self, code, kind):
+            self.code, self.kind = code, kind
+
+    pool = [Plat("jd", "new"), Plat("pdd", "new"), Plat("tmall", "new"),
+            Plat("xianyu", "used"), Plat("zhuanzhuan", "used")]
+    sel_new = platforms_for_basis(pool, "new")
+    sel_used = platforms_for_basis(pool, "used")
+    check("全新口径只留 kind=new 的平台",
+          {p.code for p in sel_new} == {"jd", "pdd", "tmall"},
+          f"实际 {[p.code for p in sel_new]}")
+    check("二手口径只留 kind=used 的平台",
+          {p.code for p in sel_used} == {"xianyu", "zhuanzhuan"},
+          f"实际 {[p.code for p in sel_used]}")
+    check("全新与二手平台集合**不相交**（数据源隔离的硬约束）",
+          not ({p.code for p in sel_new} & {p.code for p in sel_used}))
+    check("全市场口径不过滤", len(platforms_for_basis(pool, "all")) == len(pool))
+    check("未知品相按全市场处理（宽松兜底，不会把日报整个断掉）",
+          len(platforms_for_basis(pool, "weird")) == len(pool))
+
     def cell(change, name="京东", real=True, gap=1, suspect=False):
         return {"name": name, "is_real": real, "change": change,
                 "gap_days": gap, "suspect": suspect, "price": 1000.0, "has_data": True,
                 "change_basis": change_basis_label(gap)}
 
-    def row(pid, model, brand, changes):
-        return {"product_id": pid, "model": model, "short_model": model, "brand": brand,
-                "day_low": 1000.0, "hist_low": None, "value_index": 1.0, "has_real": True,
-                "cheapest_platform": {"name": "京东"}, "platforms": changes,
-                "captured_date": "2026-09-24", "is_today": True, "stale_days": 0}
+    def row(pid, model, brand, changes, **extra):
+        base = {"product_id": pid, "model": model, "short_model": model, "brand": brand,
+                "brand_code": brand.lower(),
+                "day_low": 1000.0, "day_avg": 1010.0, "day_samples": 3,
+                "day_change": None, "day_change_pct": None,
+                "hist_low": None, "value_index": 1.0,
+                "value_index_prev": None, "value_index_change": None,
+                "avg_trend": {"dates": ["2026-09-23", "2026-09-24"], "avg": [1000.0, 1010.0],
+                              "low": [980.0, 1000.0], "samples": [2, 3]},
+                "has_real": True, "captured_date": "2026-09-24", "is_today": True,
+                "stale_days": 0, "cheapest_platform": {"name": "京东"}, "platforms": changes}
+        base.update(extra)
+        return base
 
     rows = [
         row(1, "RTX 5090 32G", "NVIDIA", [cell(300.0)]),
@@ -1413,6 +1445,25 @@ def test_report_sections() -> None:
     n_sec = by_key["gpu|NVIDIA|new"]
     check("N卡板块拿到 2 行", len(n_sec["rows"]) == 2)
     check("N卡板块标题带品相", n_sec["title"] == "N卡 · 全新在售", n_sec["title"])
+    check("板块带小写厂商码（nvidia / amd / intel）",
+          n_sec["brand_code"] == "nvidia" and by_key["gpu|AMD|new"]["brand_code"] == "amd")
+
+    # ---- 契约②：N/A/I 三个阵营**互不穿透** --------------------------------
+    ids = {s["brand"]: {r["product_id"] for r in s["rows"]} for s in secs}
+    nv, am, it = ids.get("NVIDIA", set()), ids.get("AMD", set()), ids.get("Intel", set())
+    check("N卡 / A卡 / I卡 的型号集合两两不相交（互不穿透）",
+          not (nv & am) and not (nv & it) and not (am & it),
+          f"N∩A={nv & am} N∩I={nv & it} A∩I={am & it}")
+    check("每行只归属一个板块（不丢行、不重复计入）",
+          sum(len(v) for v in ids.values()) == len(rows),
+          f"板块合计 {sum(len(v) for v in ids.values())} / 原始 {len(rows)}")
+
+    # ---- 契约③：卡片必须透出的字段齐全 ------------------------------------
+    need = ("brand_code", "day_low", "day_avg", "day_samples",
+            "day_change", "day_change_pct", "value_index", "value_index_change", "avg_trend")
+    missing = [k for k in need if k not in n_sec["rows"][0]]
+    check("行带齐「最低价 / 均价 / 样本数 / 日环比额幅 / 性价比异动 / 均价走势」字段",
+          not missing, f"缺：{missing}")
 
     # ⚠️ 核心：涨跌榜只在该板块的子池里排。AMD 那条 +9999 绝不能出现在 N 卡榜上。
     up_models = [m["model"] for m in n_sec["movers"]["up"]]
@@ -1458,9 +1509,30 @@ def test_report_sections() -> None:
     w = section_watch(mixed, limit=4)
     ids = [x["product_id"] for x in w]
     check("重点观察按型号去重", len(ids) == len(set(ids)), f"{ids}")
-    check("重点观察不超过名额上限", len(w) <= 4)
+    check("重点观察不超过名额上限", len(w) <= 5)
     check("重点观察每条都带 reason（不做黑箱推荐）",
           all(x.get("reason") for x in w), f"{[x.get('reason') for x in w]}")
+
+    # 性价比异动是**独立指标**：性价比 = 跑分÷日低价，日低价跌 → 性价比升，
+    # 符号与价格涨跌相反，不能拿涨跌幅代替。
+    #
+    # ⚠️ 数据要设计成"性价比异动的那条不是涨跌榜首" —— 否则它会被涨跌规则
+    #    先挑走，去重之后性价比规则就没机会，测试会假绿（实测踩过一次）。
+    vi_rows = [
+        row(30, "性价比异动卡", "NVIDIA", [cell(-5.0)],
+            value_index=2.5, value_index_prev=1.0, value_index_change=1.5),
+        row(31, "涨幅榜首卡", "NVIDIA", [cell(50.0)],
+            value_index=1.2, value_index_prev=1.19, value_index_change=0.01),
+        row(32, "跌幅榜首卡", "NVIDIA", [cell(-500.0)],
+            value_index=1.0, value_index_prev=1.0, value_index_change=0.0),
+    ]
+    w3 = section_watch(vi_rows, limit=5)
+    check("「性价比异动」按 |变化| 挑（不是按涨跌幅）",
+          any(x["reason"] == "性价比异动" and x["product_id"] == 30 for x in w3),
+          f"{[(x['reason'], x['product_id']) for x in w3]}")
+    check("涨跌两端与性价比异动可以共存（不互相挤掉）",
+          {"涨幅最大", "跌幅最大", "性价比异动"} <= {x["reason"] for x in w3},
+          f"{[x['reason'] for x in w3]}")
 
     # 贴近史低最多占 2 个名额，否则会把涨跌两端挤光
     low_rows = [
