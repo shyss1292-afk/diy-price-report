@@ -299,10 +299,34 @@ def build_launch_args(
     args.append("about:blank")
 
     # ⚠️ 以下参数**故意不加**。它们看着像"省资源/优化"，实际会直接把
-    #    指纹特征暴露给风控，属于自毁：
+    #    指纹特征暴露给风控，属于自毁。
+    #
+    #    这不是"凭经验觉得不行"，而是**当场跑过七组对照**
+    #    （2026-09-21，`scripts/stealth_eval.py`，闲鱼搜索「RTX 5070 12G」，
+    #      末尾带基线复测以防"短时间重复搜索被软限流"造成的顺序偏差）：
+    #
+    #        变体                  卡片数   峰值MB   风控
+    #        ① 现状（离屏有头）       33      966     无
+    #        ② --headless=new         3      892     非法访问
+    #        ③ 现状 + 拦图片          3      908     无
+    #        ④ 现状复测               33     1043     无
+    #        ⑤ 关 site isolation      33     1073     无（反而 +6%）
+    #        ⑥ 限 V8 堆 256MB         33      998     无（-1%，噪声内）
+    #        ⑦ 现状再复测             33     1018     无
+    #
+    #        基线噪声 966/1043/1018 → 均值 ~1009（±4%）
+    #
+    #    结论：**在"不触发风控"的前提下，40~60% 的内存降幅做不到。**
+    #
+    #    2026-09-26 复测（单源单型号，`scripts/browser_memory.py --during`）：
+    #    峰值 783 MB / 8 进程 = 渲染 390 + utility 150 + 主进程 143 + GPU 101。
+    #    单个渲染进程就 231 MB —— 所以"压到 150 MB"在真实页面上**不可能成立**。
+    #    代价侧：轮次结束浏览器**彻底关闭**（实测回到 0 进程 / 0 MB），
+    #    不存在"多进程 Chrome 长期拖慢整机"的问题；单轮约 10 分钟。
     #
     #   --headless / --headless=new
-    #       京东/拼多多/闲鱼实测直接拦。headless 特征是最低成本的检测项
+    #       京东/拼多多/闲鱼实测直接拦。卡片数 33→3，页面命中「非法访问」。
+    #       headless 特征是最低成本的检测项
     #   --disable-gpu / --disable-software-rasterizer
     #       WebGL 拿不到，或退化成软件渲染 —— 这正是 headless 的典型特征
     #   --use-gl=swiftshader / --use-angle=swiftshader
@@ -314,7 +338,9 @@ def build_launch_args(
     #   --enable-automation
     #       会把 navigator.webdriver 置为 true
     #   --disable-images / --blink-settings=imagesEnabled=false
-    #       图片是滑块验证码的载体，禁掉等于废掉验证码
+    #       图片是滑块验证码的载体，禁掉等于废掉验证码。
+    #       实测卡片数 33→3（-91%），而内存只省约 10%（在噪声范围内）——
+    #       代价与收益严重不成比例
     #
     #   --disable-dev-shm-usage
     #       这是 **Linux 专属**参数（改 /dev/shm 用量），macOS 上是空操作。
@@ -323,6 +349,9 @@ def build_launch_args(
     #       **Chrome 没有这个参数**（`chrome://flags` 与源码里都不存在）。
     #       窗口不抢焦点是靠 `--window-position` 挪到屏幕外 + CDP 停靠实现的，
     #       见 OFFSCREEN_X / park_window_of。
+    #
+    # ⚠️ 想验证请走 `DIYPRICE_EXTRA_LAUNCH_ARGS`（上面已留通道，**不改代码**），
+    #    并且**必须带末尾基线复测**，否则会把软限流误读成参数的效果。
     return args
 
 
