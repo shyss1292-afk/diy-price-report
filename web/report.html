@@ -23,13 +23,12 @@
     </div>
 
     <!--
-      控制条：日报已按「厂商 × 品相」分板块，所以原来的「口径 all/new/used」
-      单选框不再适用（每块自带品相），换成**板块范围**过滤器。
+      导航：**四个并列视图** = 品类 × 品相。
+      品相是最主要的阅读维度（全新和二手本来就不能比价），所以提到导航层；
+      厂商（N卡/A卡/I卡、IU/AU）是**页内的分块**，不再各占一个 tab。
     -->
     <div class="ctrl-row">
-      <div class="tabs" id="catTabs"></div>
-      <span class="ctrl-label" style="margin-left:10px">板块</span>
-      <div class="tabs" id="basisTabs"></div>
+      <div class="tabs tabs-view" id="viewTabs"></div>
       <span class="ctrl-label" style="margin-left:10px">平台</span>
       <div class="tabs" id="platTabs"></div>
       <span class="ctrl-label" style="margin-left:10px">窗口</span>
@@ -65,10 +64,7 @@
 
     <div id="rpEmptyNote" class="rp-emptynote" style="display:none"></div>
 
-    <!-- 锚点导航：板块一多就要能直接跳，不然得一路滚 -->
-    <div class="anchor-nav" id="anchorNav"></div>
-
-    <!-- 板块容器：每个板块 = 标题 + KPI 条 + 涨跌榜/重点观察 + 明细表 -->
+    <!-- 板块容器：当前视图下按厂商分块，每块 = 标题 + KPI 条 + 涨跌榜/重点观察 + 明细表 -->
     <div id="sections"></div>
 
     <div class="legend">

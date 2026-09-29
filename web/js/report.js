@@ -1,6 +1,8 @@
-/* 价格日报 —— 板块化视图
+/* 价格日报 —— 四视图（品类 × 品相）分块视图
  *
- * 结构：品类（显卡/处理器）→ 板块（N卡·全新在售 / N卡·二手流转 / IU / AU …）→ 明细表
+ * 结构：视图（显卡·全新 / 显卡·二手 / 处理器·全新 / 处理器·二手）
+ *       → 页内按厂商分块（N卡 / A卡 / I卡，或 IU / AU）
+ *       → 每块：KPI 条 + 涨跌榜/重点观察 + 明细表
  *
  * ⚠️ 这里**只负责渲染**。所有「不跨品牌、不跨品相混排」的口径都在后端完成
  *    （见 app/services/report.py 的 split_sections / section_movers）。
@@ -8,12 +10,28 @@
  */
 
 const state = {
-  category: 'gpu',
-  basis: 'all',            // 板块范围：all | new | used（只是显示过滤，不是重新计算）
+  view: 'gpu:new',         // 品类:品相
   days: 180,
   platforms: ['jd', 'pdd', 'xianyu'],
   matrix: null,
 };
+
+/* 四个并列视图。
+ *
+ * 为什么品相提到导航层、厂商降到页内分块：
+ *   全新和二手**本来就不能比价**（一个是国行新货、一个是个人二手），
+ *   品相是最主要的阅读维度；厂商之间反倒可以横向看一眼。
+ *   所以「N卡全新 + A卡全新」同页，「N卡二手 + A卡二手」另页。 */
+const VIEWS = [
+  { key: 'gpu:new', category: 'gpu', basis: 'new', label: '显卡 · 全新' },
+  { key: 'gpu:used', category: 'gpu', basis: 'used', label: '显卡 · 二手' },
+  { key: 'cpu:new', category: 'cpu', basis: 'new', label: '处理器 · 全新' },
+  { key: 'cpu:used', category: 'cpu', basis: 'used', label: '处理器 · 二手' },
+];
+
+function currentView() {
+  return VIEWS.find((v) => v.key === state.view) || VIEWS[0];
+}
 
 const BRAND_STYLE = {
   NVIDIA: { color: '#3a9b3a', label: 'NVIDIA' },
@@ -269,13 +287,36 @@ function watchHtml(sec) {
 function visibleSections() {
   const m = state.matrix;
   if (!m) return [];
-  const block = (m.categories || []).find((c) => c.category === state.category);
-  if (!block) return [];
-  return (block.sections || []).filter((s) => state.basis === 'all' || s.basis === state.basis);
+  const v = currentView();
+  return (m.sections || []).filter((s) => s.category === v.category && s.basis === v.basis);
 }
 
 function secDomId(sec) {
   return 'sec-' + String(sec.key).replace(/\|/g, '-');
+}
+
+/** 视图头：一眼看清"这是哪一页、覆盖哪些平台、多少型号" */
+function viewHeadHtml() {
+  const v = currentView();
+  const secs = visibleSections();
+  const plats = [...new Set(secs.flatMap((s) => (s.platforms || []).map((p) => p.name)))];
+  const n = secs.reduce((a, s) => a + s.rows.length, 0);
+  const st = secs.reduce(
+    (a, s) => ({
+      up: a.up + (s.stats.up || 0),
+      down: a.down + (s.stats.down || 0),
+      compared: a.compared + (s.stats.compared || 0),
+    }),
+    { up: 0, down: 0, compared: 0 }
+  );
+  const chg = st.compared
+    ? `<span class="rp-chip up">涨 ${st.up}</span><span class="rp-chip down">跌 ${st.down}</span>`
+    : '<span class="rp-chip muted">可比批次不足，暂无涨跌</span>';
+  return `<div class="rp-view-head">
+    <h2>${esc(v.label)}</h2>
+    <span class="rp-view-sub">${esc(plats.join(' + ') || '—')} · ${n} 个型号</span>
+    <div class="rp-chips">${chg}</div>
+  </div>`;
 }
 
 function sectionHtml(sec) {
@@ -283,11 +324,13 @@ function sectionHtml(sec) {
   const bs = BRAND_STYLE[sec.brand] || {};
   const color = bs.color || 'var(--accent)';
   const plats = (sec.platforms || []).map((p) => p.name).join(' + ') || '—';
+  // 页内分块：标题只写厂商（品相已由视图头交代），完整标题留在 title 里
+  const shortTitle = sec.brand_label || sec.brand || sec.title;
 
   if (sec.empty) {
     return `<section class="rp-sec empty" id="${secDomId(sec)}">
       <div class="rp-sec-head">
-        <h2 class="rp-sec-title" style="color:${color}">${esc(sec.title)}</h2>
+        <h3 class="rp-sec-title" style="color:${color}" title="${esc(sec.title)}">${esc(shortTitle)}</h3>
         <span class="rp-sec-sub">本期无数据（该板块的平台尚未轮巡到型号）</span>
       </div>
     </section>`;
@@ -295,18 +338,17 @@ function sectionHtml(sec) {
 
   const chips = [
     `<span class="rp-chip">${sec.rows.length} 个型号</span>`,
-    `<span class="rp-chip">平台 ${esc(plats)}</span>`,
+    `<span class="rp-chip">${esc(plats)}</span>`,
     `<span class="rp-chip up">涨 ${st.up || 0}</span>`,
     `<span class="rp-chip down">跌 ${st.down || 0}</span>`,
     `<span class="rp-chip">可比 ${st.compared || 0}</span>`,
   ];
-  if (!st.compared) chips.push('<span class="rp-chip muted">可比批次不足，暂无涨跌</span>');
 
   return `<section class="rp-sec" id="${secDomId(sec)}">
     <div class="rp-sec-head">
-      <h2 class="rp-sec-title" style="color:${color}">
-        <span class="rp-sec-dot" style="background:${color}"></span>${esc(sec.title)}
-      </h2>
+      <h3 class="rp-sec-title" style="color:${color}" title="${esc(sec.title)}">
+        <span class="rp-sec-dot" style="background:${color}"></span>${esc(shortTitle)}
+      </h3>
       <span class="rp-sec-hint">${esc(sec.brand_hint || '')}</span>
       <div class="rp-chips">${chips.join('')}</div>
     </div>
@@ -320,36 +362,6 @@ function sectionHtml(sec) {
   </section>`;
 }
 
-/* 锚点导航：按品类分组，点一下直接跳到对应板块 */
-function renderAnchorNav() {
-  const host = document.getElementById('anchorNav');
-  const secs = visibleSections();
-  if (secs.length <= 1) {
-    host.style.display = 'none';
-    return;
-  }
-  host.style.display = '';
-  const byCat = new Map();
-  for (const s of secs) {
-    if (!byCat.has(s.category_label)) byCat.set(s.category_label, []);
-    byCat.get(s.category_label).push(s);
-  }
-  host.innerHTML = [...byCat.entries()]
-    .map(
-      ([cat, list]) =>
-        `<span class="an-cat">${esc(cat)}大盘</span>` +
-        list
-          .map(
-            (s) =>
-              `<a class="an-link${s.empty ? ' empty' : ''}" href="#${secDomId(s)}"
-                 title="${esc(s.title)}${s.empty ? '（本期无数据）' : ` · ${s.rows.length} 个型号`}"
-               >${esc(s.title)}</a>`
-          )
-          .join('')
-    )
-    .join('<span class="an-sep"></span>');
-}
-
 function renderSections() {
   const host = document.getElementById('sections');
   const secs = visibleSections();
@@ -357,7 +369,7 @@ function renderSections() {
     host.innerHTML = '<div class="panel"><div class="loading">当前条件下没有可展示的板块</div></div>';
     return;
   }
-  host.innerHTML = secs.map(sectionHtml).join('');
+  host.innerHTML = viewHeadHtml() + secs.map(sectionHtml).join('');
 }
 
 function renderKpis() {
@@ -383,10 +395,9 @@ function renderKpis() {
   document.getElementById('kpiRealFoot').textContent =
     `${cov.real_rows || 0} 条 / ${cov.real_batches || 0} 个批次 / ${cov.real_days || 0} 天`;
 
-  const catLabel =
-    ((m.categories || []).find((c) => c.category === state.category) || {}).category_label || '';
+  const v = currentView();
   document.getElementById('pageDesc').textContent =
-    `${catLabel} · ${secs.length} 个板块` +
+    `${v.label} · ${secs.length} 个厂商分块` +
     ` · ${m.date || '—'}` +
     (m.newest_batch ? ` · 批次 ${m.newest_batch}` : '');
 
@@ -394,7 +405,7 @@ function renderKpis() {
   const note = document.getElementById('rpEmptyNote');
   if (empties) {
     note.style.display = '';
-    note.textContent = `提示：当前有 ${empties} 个板块本期无数据 —— 反爬源单轮只能采少量型号，靠游标多轮覆盖，属正常现象。`;
+    note.textContent = `提示：本页有 ${empties} 个厂商分块本期无数据 —— 反爬源单轮只能采少量型号，靠游标多轮覆盖，属正常现象。`;
   } else {
     note.style.display = 'none';
   }
@@ -402,46 +413,25 @@ function renderKpis() {
 
 /* ---------------------------------------------------------------- 交互 */
 
-function renderTabs(hostId, items, isActive, onPick) {
-  const host = document.getElementById(hostId);
-  host.innerHTML = items
-    .map(
-      (it) =>
-        `<button class="tab${isActive(it) ? ' active' : ''}" data-k="${esc(it.key)}"
-           title="${esc(it.title || '')}">${esc(it.label)}</button>`
-    )
-    .join('');
+/* 视图 tab：四个并列，各自带上本视图的型号数，点一下换页 */
+function renderViewTabs() {
+  const m = state.matrix || {};
+  const host = document.getElementById('viewTabs');
+  host.innerHTML = VIEWS.map((v) => {
+    const secs = (m.sections || []).filter(
+      (s) => s.category === v.category && s.basis === v.basis
+    );
+    const n = secs.reduce((a, s) => a + s.rows.length, 0);
+    return `<button class="tab${v.key === state.view ? ' active' : ''}" data-k="${v.key}"
+      title="${esc(v.label)}">${esc(v.label)}<span class="cnt">${n}</span></button>`;
+  }).join('');
   host.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => {
-      onPick(btn.dataset.k);
-      host.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b === btn));
+      state.view = btn.dataset.k;
+      renderViewTabs();
       rerender();
     });
   });
-}
-
-function renderCatTabs() {
-  const cats = (state.matrix && state.matrix.categories) || [];
-  renderTabs(
-    'catTabs',
-    cats.map((c) => ({ key: c.category, label: c.category_label })),
-    (it) => it.key === state.category,
-    (k) => { state.category = k; }
-  );
-}
-
-function renderBasisTabs() {
-  const labels = (state.matrix && state.matrix.basis_labels) || {};
-  renderTabs(
-    'basisTabs',
-    [
-      { key: 'all', label: '全部板块' },
-      { key: 'new', label: `仅全新（${labels.new || '全新'}）` },
-      { key: 'used', label: `仅二手（${labels.used || '二手'}）` },
-    ],
-    (it) => it.key === state.basis,
-    (k) => { state.basis = k; }
-  );
 }
 
 function renderPlatTabs(plats) {
@@ -472,7 +462,6 @@ function renderPlatTabs(plats) {
 /* ---------------------------------------------------------------- 加载 */
 
 function rerender() {
-  renderAnchorNav();
   renderSections();
   renderKpis();
 }
@@ -487,8 +476,7 @@ async function load() {
     });
     const m = await api('/api/daily-report/matrix?' + qs.toString());
     state.matrix = m;
-    renderCatTabs();
-    renderBasisTabs();
+    renderViewTabs();
     rerender();
   } catch (err) {
     host.innerHTML = `<div class="panel"><div class="loading">加载失败：${esc(err.message)}</div></div>`;
