@@ -2018,6 +2018,49 @@ def test_network_error_not_counted_as_empty() -> None:
         check("网络分支用的是独立计数 net_streak", "net_streak" in seg)
 
 
+def test_coverage_scope_matches_collection() -> None:
+    """覆盖检查的「型号范围」必须和采集范围一致。
+
+    为什么必须守
+    ------------
+    项目里有**两套覆盖统计**，口径不同：
+
+      · `app/services/healthcheck.check_coverage()` —— 只算 gpu+cpu，用于自动告警
+      · `scripts/coverage.py`                       —— 全品类，用于人工查看
+
+    这两套数字**本来就不该相等**。危险在于：哪天有人把采集范围从
+    gpu,cpu 扩到别的品类（`collect_scheduled.sh` 里的
+    `DIYPRICE_FOCUS_CATEGORY`），却忘了改 healthcheck 里的
+    `category in ('gpu','cpu')` —— 自动告警就会**静默漏报新品类**，
+    而人工查看那边是正常的，于是没人会发现。
+    """
+    from sqlalchemy import text
+
+    from app.db import session_scope
+    from app.services import healthcheck
+
+    r = healthcheck.check_coverage(days=7)
+    check("check_coverage 返回在追型号总数", isinstance(r.get("total_models"), int),
+          "" if isinstance(r.get("total_models"), int) else f"{r.get('total_models')}")
+    too_wide = r["total_models"] >= 300
+    check("check_coverage 只算 gpu+cpu（采集范围），不是全品类", not too_wide,
+          f"返回 {r['total_models']} —— 若已接近全品类数（351），"
+          f"说明范围写错了或采集范围扩了但这里没跟着改" if too_wide else "")
+
+    # 与 DB 直查对照：确认就是 gpu+cpu 的活跃型号数
+    with session_scope() as s:
+        expect = s.execute(text(
+            "select count(*) from products "
+            "where is_active=1 and category in ('gpu','cpu')"
+        )).scalar()
+    check("与 DB 直查的 gpu+cpu 活跃型号数一致",
+          r["total_models"] == int(expect or 0),
+          f"检查={r['total_models']} DB={expect}")
+
+    check("返回结构含 never_collected / stale_models",
+          "never_collected" in r and "stale_models" in r)
+
+
 def test_schedule_avoids_commute() -> None:
     """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
 
@@ -2351,6 +2394,7 @@ def main() -> int:
         test_alerting_rules,
         test_page_dead_not_swallowed,
         test_network_error_not_counted_as_empty,
+        test_coverage_scope_matches_collection,
         test_policy_delays,
         test_rate_limit_detection,
         test_breaker,

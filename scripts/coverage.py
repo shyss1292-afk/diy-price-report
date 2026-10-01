@@ -5,6 +5,17 @@
 用法：
     python scripts/coverage.py            # 概要 + 按品类 + 缺今日明细
     python scripts/coverage.py --brief    # 只输出概要，不列型号
+
+⚠️ 与 `app/services/healthcheck.check_coverage()` 的分工（**两套口径**）
+--------------------------------------------------------------------
+| | 本脚本 | healthcheck.check_coverage |
+|---|---|---|
+| 范围 | **全品类（351 个型号）** | 只 gpu + cpu（130 个，= 采集范围） |
+| 口径 | 累计有过 / 今天有没有 | 从未采到 / 超 N 天没采到 |
+| 用途 | **人工查看**缺口明细 | **自动告警**（每天一次，进轮次收尾） |
+
+两者的数字**本来就不该相等**（351 vs 130）。要对比先看范围是否一致。
+自动告警那条见 `python -m app.cli health --check`。
 """
 import argparse
 import sqlite3

@@ -556,6 +556,8 @@ def cmd_health(args) -> int:
     if args.check:
         print()
         print(f"=== 型号覆盖检查（回看 {args.days} 天）===")
+        print("    ⚠️ 口径：只算 gpu + cpu（= 采集范围，130 个）。")
+        print("       要看全品类（351 个）的缺口明细用：python scripts/coverage.py")
         r = healthcheck.check_coverage(days=args.days)
         print(f"  在追型号   : {r['total_models']}")
         print(f"  从未采到过 : {len(r['never_collected'])} 个")

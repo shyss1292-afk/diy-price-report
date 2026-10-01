@@ -277,6 +277,20 @@ def check_coverage(days: int = 14, stale_after: int | None = None) -> dict:
     找「很久没采到」的型号 —— 这是覆盖率问题的**早期信号**：
     2026-10-01 统计时发现 54 个型号 14 天只采到过 1 天，
     但当时没有任何机制会告诉你这件事。
+
+    ⚠️ 与 `scripts/coverage.py` 的分工（**两套口径，别混淆**）
+    ---------------------------------------------------------
+    | | 本函数 | `scripts/coverage.py` |
+    |---|---|---|
+    | 范围 | **只 gpu + cpu（= 采集范围）** | 全品类（351 个型号） |
+    | 口径 | 从未采到 / 超 N 天没采到 | 累计有过 / 今天有没有 |
+    | 用途 | **自动告警**（每天一次） | **人工查看**缺口明细 |
+
+    所以两者的数字**本来就不该相等**（130 vs 351）。真要对比，
+    先看范围是否一致 —— 这是最容易踩的坑。
+    采集范围由 `scripts/collect_scheduled.sh` 的
+    `DIYPRICE_FOCUS_CATEGORY=gpu,cpu` 决定；哪天扩了范围，这里的
+    `category in ('gpu','cpu')` 要跟着改，否则会漏报新品类。
     """
     from sqlalchemy import text
 
