@@ -19,18 +19,100 @@ function statusPill(status) {
 
 async function loadStatus() {
   try {
-    const [status, jobs, logs] = await Promise.all([
+    const [status, jobs, logs, health] = await Promise.all([
       api('/api/admin/status'),
       api('/api/scheduler'),
       api('/api/admin/logs?limit=30'),
+      api('/api/admin/health').catch(() => null),   // 健康接口挂了不影响主面板
     ]);
     renderStatus(status);
     renderJobs(jobs.jobs || []);
     renderLogs(logs.items || []);
+    if (health) renderHealth(health);
     schedulePoll(status.running);
   } catch (err) {
     document.getElementById('pageDesc').textContent = `加载失败：${err.message}`;
   }
+}
+
+/*
+ * 采集健康面板。
+ *
+ * 报告页顶部那条是**概要**（只在有问题时出现）；这里是**详情**，
+ * 无论好坏都显示 —— 排查时需要的正是"当时各项是什么状态"。
+ * 2026-09-29 全天 0 条没人知道，事后复盘时连"当时告警开没开"都查不到。
+ */
+function renderHealth(h) {
+  const el = document.getElementById('health');
+  if (!el) return;
+
+  const cov = h.coverage || {};
+  const pct = Number(cov.pct || 0);
+  const cfg = h.alerting || {};
+  const st = h.health || {};
+  const rules = cfg.rules || {};
+  const fails = st.source_fails || {};
+  const sup = cfg.suppressed || {};
+  const br = h.breaker || {};
+
+  // 用文件既有的样式约定（sep / muted / 内联），不引入新 class ——
+  // 这个项目的 CSS 是手写的，凭空加 class 只会得到一个没样式的空壳。
+  const line = (label, value) =>
+    `<div style="display:flex;align-items:flex-start;justify-content:space-between;` +
+    `gap:14px;padding:5px 0">` +
+      `<span class="muted" style="flex:none;min-width:72px;font-size:12px">${label}</span>` +
+      `<span style="flex:1;text-align:right;font-size:12px;word-break:break-all">${value}</span>` +
+    `</div>`;
+
+  const covCls = pct === 0 ? 'is-bad' : (pct < 50 ? 'is-warn' : 'is-ok');
+
+  const chips = [];
+  chips.push(`<span class="health-chip ${covCls}">今日覆盖 ${cov.covered ?? '—'}/${cov.total ?? '—'}（${pct}%）</span>`);
+
+  Object.entries(br).forEach(([code, e]) => {
+    const isLogin = /login|passport|登录/i.test(e.reason || '');
+    chips.push(
+      `<span class="health-chip ${isLogin ? 'is-bad' : 'is-warn'}">` +
+      `${code} ${isLogin ? '登录失效' : '熔断'} · 剩 ${e.remaining_text || '?'}</span>`
+    );
+  });
+  Object.entries(fails).filter(([c, n]) => n > 0 && c !== 'mock').forEach(([code, n]) => {
+    chips.push(`<span class="health-chip is-bad">${code} 连续 ${n} 轮失败</span>`);
+  });
+  if ((st.zero_streak || 0) > 0) {
+    chips.push(`<span class="health-chip is-bad">连续 ${st.zero_streak} 轮 0 条</span>`);
+  }
+  if (chips.length === 1 && covCls === 'is-ok') {
+    chips.push('<span class="health-chip is-ok">一切正常</span>');
+  }
+
+  const chan = [];
+  chan.push(cfg.enabled ? '总开关开' : '<b>总开关关</b>');
+  chan.push(cfg.macos_notification ? 'macOS 通知开' : 'macOS 通知关');
+  chan.push(cfg.webhook_enabled ? `webhook 开（${cfg.webhook_type}）` : 'webhook 关');
+
+  const supList = Object.entries(sup);
+  const last = st.last_round || {};
+
+  el.innerHTML =
+    `<div class="chip-row" style="gap:6px;margin-bottom:10px">${chips.join('')}</div>` +
+    line('上一轮', last.at ? `${esc(last.at)} · ${int(last.listings)} 条` : '无记录') +
+    line('告警通道', esc(chan.join(' · '))) +
+    line('规则',
+         `连续 ${rules.zero_yield_rounds} 轮 0 条 → critical<br>` +
+         `单源连续 ${rules.source_fail_rounds} 轮失败 → warn<br>` +
+         `型号 ${rules.model_stale_days} 天未覆盖 → warn`) +
+    line('抑制中', supList.length
+      ? esc(supList.map(([k, v]) => `${k}（${v}）`).join(' ｜ '))
+      : '无') +
+    line('配置文件', cfg.config_exists
+      ? `<code style="font-size:11px">${esc(cfg.config_file)}</code>`
+      : `<b>不存在，用默认值</b><br><code style="font-size:11px">${esc(cfg.config_file)}</code>`) +
+    `<div class="sep" style="margin:10px 0"></div>` +
+    `<div class="muted" style="font-size:11px">` +
+      `自测通道：<code>python -m app.cli alert --test</code>　` +
+      `覆盖检查：<code>python -m app.cli health --check</code>` +
+    `</div>`;
 }
 
 function schedulePoll(running) {

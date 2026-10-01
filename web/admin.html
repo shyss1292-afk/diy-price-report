@@ -62,6 +62,19 @@
       </div>
     </div>
 
+    <!--
+      采集健康：详情面板（报告页顶部那条是概要，只在有问题时出现）。
+      这里无论好坏都显示 —— 排查时需要的正是「当时各项是什么状态」。
+      2026-09-29 全天 0 条没人知道，事后连「当时告警开没开」都查不到。
+    -->
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <div class="panel-title">采集健康</div>
+        <span class="muted">告警通道 · 覆盖率 · 熔断</span>
+      </div>
+      <div class="panel-body" id="health"><div class="loading">加载中…</div></div>
+    </div>
+
     <div class="panel">
       <div class="panel-head">
         <div class="panel-title">采集日志</div>
