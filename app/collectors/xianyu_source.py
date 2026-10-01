@@ -27,7 +27,7 @@ from datetime import date
 
 from . import normalize
 from . import policy
-from .base import BaseCollector, Quote, page_dead, run_browser_batch
+from .base import BaseCollector, Quote, note_stage, page_dead, run_browser_batch
 from .registry import register
 
 logger = logging.getLogger("diyprice.collector.xianyu")
@@ -278,6 +278,7 @@ class XianyuCollector(BaseCollector):
                 pass
 
         if rows:
+            note_stage("接口命中")
             logger.info(
                 "闲鱼 %s 命中搜索接口：%d 条（含发布时间/地区/商品链接）",
                 product.model, len(rows),
@@ -285,6 +286,7 @@ class XianyuCollector(BaseCollector):
         else:
             # 接口没拿到（改版/被降级/超时）→ 回落 DOM。
             # **两条路都留着**，任何一条断了都不至于整源归零。
+            note_stage("回落DOM")
             rows = self._rows_from_dom(page, product)
             if rows:
                 logger.info(

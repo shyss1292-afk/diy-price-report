@@ -3044,6 +3044,63 @@ def test_dedupe_identity() -> None:
           "from ..collectors.base import Quote, quote_identity" in tq_src)
 
 
+def test_stage_counts() -> None:
+    """轮次分段计数 —— 让「某源今天数据少」能定位到具体哪一段。
+
+    各段失败**表现完全一样**（都是 0 条），但处置方式不同：
+    网络没到 / 页面没就绪 / 接口没命中 / 解析失败 / 入库被过滤。
+    借鉴自参考项目用三个分段计数区分「没推到」与「推到了没解开」。
+    """
+    from app.collectors import base as B
+
+    B.take_stage_counts()   # 归零
+    check("分段计数：初始为空", B.stage_counts() == {})
+    check("分段计数：空表格式化不产生噪声", B.format_stages() == "")
+
+    B.note_stage("接口命中")
+    B.note_stage("接口命中")
+    B.note_stage("回落DOM")
+    B.note_stage("有结果型号", 3)
+    counts = B.stage_counts()
+    check("分段计数：按名字累加（含 n 参数）",
+          counts == {"接口命中": 2, "回落DOM": 1, "有结果型号": 3}, str(counts))
+    check("分段计数：格式化含全部键值",
+          B.format_stages().count("·") == 2 and "接口命中 2" in B.format_stages(),
+          B.format_stages())
+
+    taken = B.take_stage_counts()
+    check("分段计数：取走返回累计值", taken == counts, str(taken))
+    check("分段计数：取走即清空（数字不串轮）", B.stage_counts() == {})
+
+    # ---- 接线：打点必须真的在（不然计数永远是空的）----
+    import pathlib as _pl
+    src = _pl.Path("app/collectors/base.py").read_text(encoding="utf-8")
+    check("批次开头清空计数（否则上一轮数字串进来）",
+          "take_stage_counts()  # 新一轮" in src)
+    for stage in ("有结果型号", "空结果型号", "限流中止", "异常型号"):
+        check(f"打点存在：{stage}", f'note_stage("{stage}")' in src)
+    check("结束日志带上分段计数（否则要翻数据库才知道）",
+          'logger.info("%s 分段计数：%s", label, format_stages(stages))' in src)
+
+    xy = _pl.Path("app/collectors/xianyu_source.py").read_text(encoding="utf-8")
+    check("闲鱼：接口命中与 DOM 回落分别打点（这才是最有区分度的一段）",
+          'note_stage("接口命中")' in xy and 'note_stage("回落DOM")' in xy)
+
+    pl = _pl.Path("app/services/pipeline.py").read_text(encoding="utf-8")
+    check("分段计数进 summary（调用方不必翻日志）",
+          '"stages": take_stage_counts(),' in pl)
+
+    # ⚠️ 上面全是**文本**断言 —— 它们抓不到"少写了一个 import"。
+    #    实测踩到过：源文件里明明有 note_stage("接口命中")，但模块没导入它，
+    #    真实采集时报 NameError，而自检全绿。所以这里必须**真的导进来试试**。
+    from app.collectors import xianyu_source as _xy_mod
+    from app.collectors import base as _base_mod
+    check("打点用的符号必须真的能解析（文本断言抓不到缺导入）",
+          callable(getattr(_xy_mod, "note_stage", None))
+          and callable(getattr(_base_mod, "note_stage", None))
+          and callable(getattr(_base_mod, "take_stage_counts", None)))
+
+
 def test_registry_is_clean() -> None:
     """元守卫：测试注册表与定义必须一一对应。
 
@@ -3085,6 +3142,7 @@ def test_registry_is_clean() -> None:
 
 def main() -> int:
     tests = (
+        test_stage_counts,
         test_dedupe_identity,
         test_xianyu_api_parse,
         test_registry_is_clean,

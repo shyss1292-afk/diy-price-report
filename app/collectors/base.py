@@ -328,6 +328,47 @@ def should_reset_backoff(quote_count: int, aborted: bool, suspect_throttle: bool
     return int(quote_count or 0) > 0 and not aborted and not suspect_throttle
 
 
+# ----------------------------------------------------------------------
+# 轮次分段计数
+# ----------------------------------------------------------------------
+#
+# 为什么需要它：出问题时我们只能看到一句"某源今天数据少"，然后回去翻日志猜
+# 是卡在哪一段 —— 网络没到？页面没就绪？接口没命中？解析失败？还是入库被过滤？
+# 这几段的失败**表现完全一样**（都表现为 0 条），但处置方式完全不同。
+#
+# 借鉴自参考项目 superboyyy/xianyu_spider：它用 ws_frames / sync_pushes / parsed
+# **三个分段计数**区分"服务端没推"和"推到了但没解开" —— 而不是笼统一句"连接失败"。
+#
+# 实现刻意做成"模块级累加 + 取走即清"：采集是单进程单线程的，
+# 不需要锁；取走即清保证每一轮的数字不会串到下一轮。
+_STAGE_COUNTS: dict[str, int] = {}
+
+
+def note_stage(name: str, n: int = 1) -> None:
+    """记录一次阶段事件。"""
+    _STAGE_COUNTS[name] = _STAGE_COUNTS.get(name, 0) + n
+
+
+def stage_counts() -> dict[str, int]:
+    """看一眼当前累计（不清空）—— 用于在日志里打点。"""
+    return dict(_STAGE_COUNTS)
+
+
+def take_stage_counts() -> dict[str, int]:
+    """取走并清空累计 —— 轮次结束时调用。"""
+    out = dict(_STAGE_COUNTS)
+    _STAGE_COUNTS.clear()
+    return out
+
+
+def format_stages(counts: dict[str, int] | None = None) -> str:
+    """把阶段计数排成一行，供日志使用。"""
+    data = counts if counts is not None else stage_counts()
+    if not data:
+        return ""
+    return " · ".join(f"{k} {v}" for k, v in data.items())
+
+
 def quote_identity(
     platform_code: str, title_raw: str, price: object, url: str = ""
 ) -> str:
@@ -419,6 +460,7 @@ def run_browser_batch(
     from . import policy
 
     label = label or getattr(collector, "name", "") or collector.code
+    take_stage_counts()  # 新一轮：清掉上一轮的残留，数字不串轮
     if not limit or not products:
         return []
 
@@ -484,9 +526,11 @@ def run_browser_batch(
                     # ---- 熔断：不再"记一笔失败继续下一个" ----
                     tq.mark_failed(task.task_id, f"限流：{exc.indicator}"[:80])
                     aborted, hit = True, exc
+                    note_stage("限流中止")
                     break
                 except Exception as exc:  # noqa: BLE001 —— 单个型号失败不该中断整轮
                     tq.mark_failed(task.task_id, str(exc)[:80])
+                    note_stage("异常型号")
                     logger.warning("%s 采集异常 %s：%s", label, product.model, str(exc)[:90])
                     worker.note_task()
                     # 页面/浏览器已经崩了 → 当前实例不可信。标记之后，下一个
@@ -532,6 +576,7 @@ def run_browser_batch(
                     tq.mark_done(task.task_id, len(found))
                     fresh.extend(found)
                     empty_streak = 0
+                    note_stage("有结果型号")
                     net_streak = 0        # 采到数据 = 网络是通的
                     logger.info(
                         "%s [%d/%d] %s → %d 条", label, index, total, product.model, len(found)
@@ -539,6 +584,7 @@ def run_browser_batch(
                 else:
                     tq.mark_failed(task.task_id, "搜索无结果")
                     empty_streak += 1
+                    note_stage("空结果型号")
                     logger.info(
                         "%s [%d/%d] %s → 0 条（连续第 %d 次空结果）",
                         label, index, total, product.model, empty_streak,
@@ -641,9 +687,14 @@ def run_browser_batch(
                 label, len(merged),
             )
 
+    stages = take_stage_counts()
     logger.info(
         "%s 采集结束：%d 个型号 → %d 条报价，耗时 %.1fs%s",
         label, len(batch), len(merged), time.monotonic() - started,
         "（限流中止）" if aborted else ("（网络故障中止）" if network_down else ""),
     )
+    if stages:
+        # 分段计数：出问题时一眼看出卡在哪一段。各段失败**表现都是 0 条**，
+        # 但处置方式完全不同（网络没到？没就绪？接口没命中？解析失败？入库被过滤？）
+        logger.info("%s 分段计数：%s", label, format_stages(stages))
     return merged

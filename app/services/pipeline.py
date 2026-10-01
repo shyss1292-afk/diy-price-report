@@ -641,11 +641,16 @@ def run_pipeline(
 
         status = _finish_crawl_log(log_id, items, errors)
 
+        # 分段计数进 summary：调用方（CLI / HTTP / 管理页）不必翻日志
+        # 就能看出「这个源本轮卡在哪一段」。
+        from ..collectors.base import take_stage_counts
+
         summary["sources"].append(
             {
                 "source": collector.code,
                 "name": collector.name,
                 "status": status,
+                "stages": take_stage_counts(),
                 "items": items,
                 "matched": matched,
                 "unmatched": unmatched,
