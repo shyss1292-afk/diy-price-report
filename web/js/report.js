@@ -525,6 +525,99 @@ function exportCsv() {
   toast('已导出 CSV');
 }
 
+/* ---------------------------------------------------- 采集健康条（顶部） */
+
+/*
+ * 只在**有问题时**显示。健康时不占位置 —— 一条永远存在的横幅，几周后就被无视了。
+ *
+ * 2026-09-29 的教训：全天 15 轮 0 条、覆盖 0/130，跑了一整天没人知道。
+ * macOS 通知会消失，报告页上必须能回看。
+ */
+async function renderHealth() {
+  const el = document.getElementById('healthStrip');
+  if (!el) return;
+  let h;
+  try {
+    h = await api('/api/admin/health');
+  } catch (err) {
+    return;                       // 拿不到就静默 —— 不能因为健康条挂了影响报告
+  }
+
+  const cov = h.coverage || {};
+  const pct = Number(cov.pct || 0);
+  const alerts = h.alerting || {};
+  const health = h.health || {};
+  const fails = health.source_fails || {};
+  const broken = Object.entries(fails).filter(([, n]) => n > 0);
+
+  // 判定严重度：覆盖率 < 50% 或 有源在熔断/连续失败 → 出问题
+  const breakerOn = Object.keys(h.breaker || {}).length > 0;
+  const lowCoverage = pct > 0 && pct < 50;
+  const isProblem = lowCoverage || broken.length > 0 || breakerOn;
+
+  if (!isProblem) {
+    // 健康 → 不显示。想看覆盖率的话展开下方 KPI 就行。
+    el.className = 'health-strip';
+    el.innerHTML = '';
+    return;
+  }
+
+  const critical = pct === 0 || broken.length >= 2;
+  el.className = 'health-strip is-on ' + (critical ? 'is-critical' : 'is-warn');
+
+  const chips = [];
+
+  // 覆盖率
+  chips.push(
+    `<span class="health-chip ${lowCoverage ? 'is-bad' : ''}">` +
+      `今日覆盖 <b>${cov.covered ?? '—'}/${cov.total ?? '—'}</b>（${pct}%）` +
+    `</span>`
+  );
+
+  // 熔断中的源
+  const br = h.breaker || {};
+  Object.entries(br).forEach(([code, e]) => {
+    const reason = e.reason || '';
+    const isLogin = /login|passport|登录/i.test(reason);
+    chips.push(
+      `<span class="health-chip ${isLogin ? 'is-bad' : 'is-warn'}">` +
+        `${code} ${isLogin ? '登录失效' : '熔断'} · 剩 ${e.remaining_text || '?'}` +
+      `</span>`
+    );
+  });
+
+  // 连续失败的源（排除 0 和 mock）
+  broken.filter(([c]) => c !== 'mock').forEach(([code, n]) => {
+    chips.push(`<span class="health-chip is-bad">${code} 连续 ${n} 轮失败</span>`);
+  });
+
+  // 连续 0 条
+  if ((health.zero_streak || 0) > 0) {
+    chips.push(
+      `<span class="health-chip is-bad">连续 ${health.zero_streak} 轮 0 条</span>`
+    );
+  }
+
+  const icon = critical ? '🔴' : '⚠️';
+  const head = pct === 0
+    ? '今天<b>一条数据都没采到</b>'
+    : lowCoverage
+      ? `今天只覆盖了 <b>${pct}%</b> 的型号`
+      : '采集有异常';
+
+  const bar = `<span class="health-bar ${lowCoverage ? 'is-low' : ''}">` +
+              `<i style="width:${Math.min(100, pct)}%"></i></span>`;
+
+  el.innerHTML =
+    `<span class="hs-icon">${icon}</span>` +
+    `<span class="hs-text">${head}</span>` +
+    bar +
+    chips.join('') +
+    `<span class="hs-text muted" style="margin-left:auto;font-size:12px">` +
+      `诊断：<code>python -m app.cli health</code>` +
+    `</span>`;
+}
+
 /* ---------------------------------------------------------------- 启动 */
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -532,7 +625,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     state.days = Number(e.target.value);
     load();
   });
-  document.getElementById('btnRefresh').addEventListener('click', load);
+  document.getElementById('btnRefresh').addEventListener('click', () => {
+    load();
+    renderHealth();               // 刷新时健康条一起更新
+  });
   document.getElementById('btnExport').addEventListener('click', exportCsv);
 
   try {
@@ -545,5 +641,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       { code: 'xianyu', label: '闲鱼' },
     ]);
   }
+  renderHealth();
   load();
 });

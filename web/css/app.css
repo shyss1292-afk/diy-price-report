@@ -1009,3 +1009,68 @@ table.data th.plat-col { background: linear-gradient(180deg, #f4f8fe 0%, #eef4fd
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .sidebar { background: #ffffff; }
 }
+
+/* ============================================================================
+   采集健康条（报告页顶部）
+   ----------------------------------------------------------------------------
+   只在**有问题时**出现。健康的时候不占位置 —— 否则它会变成一条永远存在的
+   横幅，几周后就被无视了（跟没做一样）。
+   2026-09-29 全天 0 条没人知道的教训：光有通知不够，报告页上要能看见。
+   ============================================================================ */
+.health-strip {
+  display: none;               /* 默认隐藏，有问题才由 JS 打开 */
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--flat);
+  border-radius: 10px;
+  background: var(--panel);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.health-strip.is-on { display: flex; }
+.health-strip.is-critical { border-left-color: var(--up); background: var(--up-soft); }
+.health-strip.is-warn     { border-left-color: #d98a00; background: #fff8e8; }
+.health-strip.is-ok       { border-left-color: var(--down); background: var(--down-soft); }
+
+.health-strip .hs-icon { font-size: 15px; flex: none; }
+.health-strip .hs-text { color: var(--text); }
+.health-strip .hs-text b { font-weight: 600; }
+.health-strip .hs-sep { color: var(--flat); }
+
+.health-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-accent);
+  background: #fff;
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.health-chip.is-bad  { border-color: var(--up-line);   background: var(--up-soft);   color: var(--up); }
+.health-chip.is-warn { border-color: #f0d9a8;          background: #fff8e8;          color: #8a5a00; }
+.health-chip.is-ok   { border-color: var(--down-line); background: var(--down-soft); color: var(--down); }
+
+/* 覆盖率条：一眼看出今天采了多少 */
+.health-bar {
+  flex: 1 1 120px;
+  min-width: 90px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.health-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width .3s ease;
+}
+.health-bar.is-low > i { background: var(--up); }
