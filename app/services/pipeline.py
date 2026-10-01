@@ -39,6 +39,7 @@ from .aggregate import refresh_daily
 from .bootstrap import bootstrap
 from .clean import check as clean_check
 from . import healthcheck
+from . import heartbeat
 from .normalize import ModelMatcher
 
 logger = logging.getLogger("diyprice.pipeline")
@@ -63,6 +64,80 @@ def wall_clock_limit() -> float:
                               or _DEFAULT_WALL_CLOCK_LIMIT))
     except ValueError:
         return _DEFAULT_WALL_CLOCK_LIMIT
+
+
+# 单个型号超过这么久没进展 → 判定卡住。
+#
+# 定 240 秒的依据（2026-10-01 实测）：
+#   · 单个型号正常约 30~40 秒（闲鱼最慢，含行为模拟与间隔）
+#   · 正常轮次 P50 = 11.4 分钟（= 十几个型号），P75 = 12.9 分钟
+#   · 而卡住时**单个型号能挂 35 分钟以上**
+# 240 秒给了 6 倍余量，既不会误杀慢型号，又能把"卡住"从 35 分钟压到 4 分钟。
+_STALL_LIMIT_SECONDS = float(os.getenv("DIYPRICE_STALL_LIMIT", "") or 240.0)
+
+
+def _install_stall_guard(limit: float) -> None:
+    """停滞看门狗：单个型号超过 `limit` 秒没进展就**强制结束进程**。
+
+    为什么需要它（2026-10-01 实测）
+    -------------------------------
+    断网时 `page.goto(timeout=40000)` **不返回** —— Playwright 的 timeout
+    在 CDP / 网络栈卡住时**不生效**。一轮采集因此一直卡到 35 分钟的墙钟兜底
+    才被杀。代价：
+
+      · 192 轮里 **77 轮（40%）** 是这么死的
+      · 被杀的轮次中位数 **44.6 分钟**，而正常轮次 P50 只有 **11.4 分钟**
+      · 卡住的轮次占满整个调度间隔（1 小时），把后续轮次挤掉
+        （10-01 只跑成 11 轮，而调度本该 17 轮）
+
+    ⚠️ 为什么用 `os._exit()` 而不是 SIGALRM 中断 Playwright
+    -----------------------------------------------------
+    实测 SIGALRM 确实能精准中断卡住的调用（`wait_for_timeout(60s)` 在
+    3.0s 被打断），**但中断后浏览器实例进入不一致状态** —— 紧接着的
+    `page.goto('data:...', timeout=8000)` 挂了 2 分钟以上都没返回。
+
+    与其去修复一个状态已坏的实例，不如直接结束本轮：下一轮的
+    `_purge_stale()` 会清掉残留进程、重建实例（约 3 秒），
+    而未完成的任务本来就留在队列里、下一轮优先重做。
+    """
+    if limit <= 0:
+        return
+    poll = 5.0
+
+    def _guard() -> None:
+        while True:
+            _time.sleep(poll)
+            stalled = heartbeat.stalled_seconds()
+            if stalled >= limit:
+                logger.error("=" * 68)
+                logger.error(
+                    "单个型号已 %.0f 秒没有任何进展（阈值 %.0f 秒），判定卡死，"
+                    "强制结束本轮。", stalled, limit,
+                )
+                logger.error(
+                    "常见原因：采集途中断网 → Playwright 的 goto 不返回"
+                    "（它的 timeout 在网络栈卡住时不生效）。"
+                )
+                logger.error("未完成的任务留在队列里，下一轮会优先重做。")
+                logger.error("=" * 68)
+                # 顺手 SIGKILL 浏览器，别留孤儿进程吃内存。
+                # 这里**不调用 worker.stop()** —— 它第一步走 Playwright 的
+                # browser.close()，而实例卡住时那个调用同样不会返回，
+                # 等于白等。直接按 profile 找进程发信号最快。
+                try:
+                    from .browser_worker import get_worker
+                    from .session import profile_pids
+
+                    for pid in profile_pids(get_worker().config.profile_dir):
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception:  # noqa: BLE001 —— 清理失败不能挡住退出
+                    pass
+                os._exit(4)   # 用独立退出码，便于在日志里区分于墙钟兜底（3）
+
+    threading.Thread(target=_guard, name="stall-guard", daemon=True).start()
 
 
 def _install_wall_clock_guard(limit: float) -> None:
@@ -325,6 +400,10 @@ def run_pipeline(
     install_shutdown_handlers()
     # 墙钟兜底（与 shell 看门狗双保险）—— 见 _install_wall_clock_guard
     _install_wall_clock_guard(wall_clock_limit())
+    # 停滞看门狗：单个型号卡住时**远早于**墙钟兜底就结束本轮
+    # （断网时 Playwright 的 goto 不返回，实测卡 35+ 分钟）
+    _install_stall_guard(_STALL_LIMIT_SECONDS)
+    heartbeat.reset()   # 起始心跳：别让上一轮的陈旧值立刻触发看门狗
     worker = get_worker()
 
     # 熔断状态可见性：把上一轮留下的冷却记录在轮次开头打出来 ——

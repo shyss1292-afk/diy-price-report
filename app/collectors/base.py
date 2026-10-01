@@ -251,6 +251,13 @@ def _next_batch(source: str, products: list, day: date, limit: int) -> list:
     return queued[:limit]
 
 
+def _heartbeat():
+    """延迟导入心跳模块 —— services 与 collectors 互相依赖，
+    模块级 import 会循环。"""
+    from ..services import heartbeat
+    return heartbeat
+
+
 def page_dead(exc: Exception) -> bool:
     """异常是否表示「页面 / 浏览器已经不可用」。
 
@@ -439,6 +446,10 @@ def run_browser_batch(
                     continue
 
                 tq.mark_running(task.task_id)
+                # 心跳：停滞看门狗靠它区分「慢」和「卡死」。
+                # 放在**调用之前** —— 万一 search_fn 卡住，看门狗才知道
+                # 是从这一刻起没有进展的。
+                _heartbeat().note()
                 try:
                     found = search_fn(page, product)
                 except policy.RateLimitError as exc:

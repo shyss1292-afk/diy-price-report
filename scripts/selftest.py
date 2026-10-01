@@ -2126,6 +2126,68 @@ def test_alert_config_update() -> None:
             alerting.CONFIG_FILE, alerting.STATE_FILE = orig_cfg, orig_state
 
 
+def test_stall_guard_config() -> None:
+    """停滞看门狗：阈值关系与心跳语义。
+
+    为什么必须守
+    ------------
+    2026-10-01 实测：断网时 `page.goto(timeout=40000)` **不返回**
+    （Playwright 的 timeout 在网络栈卡住时不生效），一轮卡到 35 分钟的
+    墙钟兜底才被杀。192 轮里 **77 轮（40%）** 是这么死的，
+    被杀的轮次中位数 44.6 分钟，而正常轮次 P50 只有 11.4 分钟。
+
+    停滞看门狗是**更早**的那道防线。它要生效，必须满足：
+
+      1. 阈值**远小于**墙钟上限 —— 否则永远轮不到它，等于没装
+      2. 阈值**大于**单个型号的正常耗时 —— 否则会把慢型号误判成卡死
+      3. 心跳语义正确 —— 它是「慢」和「卡死」的唯一区分依据
+
+    ⚠️ 这条断言守的是**配置关系**，不是实现细节 —— 哪天有人把阈值调到
+       比墙钟还大（或改小到低于单个型号耗时），自检必须立刻发现。
+    """
+    import time as _t
+
+    from app.services import heartbeat, pipeline
+
+    # ---- ① 阈值关系 ----
+    stall = pipeline._STALL_LIMIT_SECONDS
+    wall = pipeline.wall_clock_limit()
+    check("停滞阈值 > 0（0 等于关掉）", stall > 0, f"{stall}")
+    check("停滞阈值必须**小于**墙钟上限（否则永远轮不到它）",
+          stall < wall, f"停滞 {stall:.0f}s vs 墙钟 {wall:.0f}s")
+
+    # 单个型号正常 30~40 秒；阈值要留足余量，别把慢型号当卡死
+    check("停滞阈值 ≥ 120s（给单个型号留足余量，别误杀慢型号）",
+          stall >= 120, f"{stall:.0f}s")
+    # 但也不能太宽松，否则又回到"卡 35 分钟"
+    check("停滞阈值 ≤ 600s（太大就失去意义，退化成墙钟兜底）",
+          stall <= 600, f"{stall:.0f}s")
+
+    # ---- ② 心跳语义 ----
+    heartbeat.note()
+    check("note() 后停滞时间归零", heartbeat.stalled_seconds() < 0.5,
+          f"{heartbeat.stalled_seconds():.2f}s")
+    _t.sleep(0.25)
+    check("停滞时间随时间增长", heartbeat.stalled_seconds() >= 0.2,
+          f"{heartbeat.stalled_seconds():.2f}s")
+    heartbeat.note()
+    check("再次 note() 又归零", heartbeat.stalled_seconds() < 0.5,
+          f"{heartbeat.stalled_seconds():.2f}s")
+    heartbeat.reset()
+    check("reset() 等价于 note()", heartbeat.stalled_seconds() < 0.5)
+
+    # ---- ③ 采集循环里必须真的调心跳 ----
+    # 不调的话看门狗永远看到「刚有进展」，卡死时也不会触发 —— 装了等于没装。
+    import inspect
+
+    from app.collectors import base as base_mod
+
+    src = inspect.getsource(base_mod.run_browser_batch)
+    check("run_browser_batch 里调了心跳（否则看门狗形同虚设）",
+          "note()" in src and "_heartbeat" in src,
+          "没找到心跳调用")
+
+
 def test_schedule_avoids_commute() -> None:
     """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
 
@@ -2461,6 +2523,7 @@ def main() -> int:
         test_network_error_not_counted_as_empty,
         test_coverage_scope_matches_collection,
         test_alert_config_update,
+        test_stall_guard_config,
         test_policy_delays,
         test_rate_limit_detection,
         test_breaker,
