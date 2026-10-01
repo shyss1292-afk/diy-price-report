@@ -490,6 +490,43 @@ def cmd_alert(args) -> int:
         print("默认只开 macOS 系统通知；要手机也能收到就填 webhook.url。")
         return 0
 
+    # ---- 配 webhook ----
+    # 为什么要做成命令而不是让用户手改 JSON：手改容易把 JSON 写坏，
+    # 而配置坏了告警会**静默失效**（load_config 回退默认值，用户不会知道）。
+    if args.set_webhook:
+        cfg = alerting.update_config(webhook={
+            "enabled": True, "url": args.set_webhook, "type": args.type,
+        })
+        print(f"已配置 webhook（type={args.type}）")
+        print(f"  配置文件：{alerting.CONFIG_FILE}")
+        print()
+        print("立刻发一条测试告警验证…")
+        r = alerting.self_test()
+        if r.get("sent"):
+            print(f"✅ 通道正常：{', '.join(r['channels'])}")
+            if "webhook" not in r.get("channels", []):
+                print("⚠️ macOS 通知发出去了，但 **webhook 没成功** —— 检查 URL 是否正确、")
+                print("   机器人是否设了「自定义关键词」（钉钉/企微要求消息里含关键词，")
+                print("   本项目发的标题以 [WARN]/[CRITICAL] 开头，可把关键词设成「告警」）。")
+        else:
+            print(f"❌ 测试告警没发出去（{r.get('reason', '通道全失败')}）")
+            print("   看上面日志里的 webhook 失败原因。")
+        return 0 if r.get("sent") else 1
+
+    if args.off:
+        alerting.update_config(webhook={"enabled": False})
+        print("已关闭 webhook（macOS 系统通知不受影响）")
+        return 0
+
+    if args.set_cooldown is not None:
+        if args.set_cooldown < 0:
+            print("冷却窗口不能为负")
+            return 2
+        alerting.update_config(cooldown_seconds=args.set_cooldown)
+        print(f"抑制窗口已改为 {args.set_cooldown}s"
+              f"（同一个 key 在这个窗口内只发一次；0 = 不抑制）")
+        return 0
+
     if args.clear:
         n = alerting.clear_suppression()
         print(f"已清掉 {n} 条抑制记录（下次触发会立刻再发一次）")
@@ -650,6 +687,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_alert.add_argument("--status", action="store_true", help="查看配置与抑制状态")
     p_alert.add_argument("--clear", action="store_true", help="清掉抑制状态（改完配置想立刻验证时用）")
     p_alert.add_argument("--init", action="store_true", help="生成默认配置文件")
+    p_alert.add_argument("--set-webhook", metavar="URL",
+                         help="配 webhook 并立刻自测（钉钉/企业微信/Bark/通用）")
+    p_alert.add_argument("--type", default="generic",
+                         choices=["generic", "dingtalk", "wecom", "bark"],
+                         help="webhook 类型（--set-webhook 时用）")
+    p_alert.add_argument("--off", action="store_true", help="关掉 webhook")
+    p_alert.add_argument("--set-cooldown", type=int, metavar="SECONDS",
+                         help="改抑制窗口（同一 key 多久内只发一次）")
     p_alert.set_defaults(func=cmd_alert)
 
     p_health = sub.add_parser("health", help="采集健康：连续失败轮数 / 型号覆盖")

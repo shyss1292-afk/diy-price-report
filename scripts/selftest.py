@@ -2061,6 +2061,71 @@ def test_coverage_scope_matches_collection() -> None:
           "never_collected" in r and "stale_models" in r)
 
 
+def test_alert_config_update() -> None:
+    """告警配置的局部更新（`alert --set-webhook` / `--off` / `--set-cooldown`）。
+
+    为什么要守
+    ----------
+    这些命令是**写配置文件**的。写坏的后果特别隐蔽：`load_config()` 遇到
+    损坏的 JSON 会**回退默认值**，于是告警静默失效 —— 用户以为配好了，
+    实际一条都收不到，直到出事才发现。
+
+    所以两个方向都要守：
+      1. 局部更新**不能把没改的键抹掉**（改 webhook 不能顺手关了 macOS 通知）
+      2. 写出来的必须是**合法 JSON**，且能被 load_config 读回来
+    """
+    import json
+    import tempfile
+    from pathlib import Path as _P
+
+    from app.services import alerting
+
+    with tempfile.TemporaryDirectory() as td:
+        orig_cfg, orig_state = alerting.CONFIG_FILE, alerting.STATE_FILE
+        alerting.CONFIG_FILE = _P(td) / "alert_config.json"
+        alerting.STATE_FILE = _P(td) / "alert_state.json"
+        try:
+            # ---- ① 从零配置开始：局部更新不能抹掉其他默认键 ----
+            cfg = alerting.update_config(webhook={
+                "enabled": True, "url": "https://example.com/hook", "type": "dingtalk",
+            })
+            check("update_config 返回合并后的配置",
+                  cfg["webhook"]["enabled"] is True and cfg["webhook"]["type"] == "dingtalk")
+            check("改 webhook 不会关掉 macOS 通知（默认值仍在）",
+                  cfg.get("macos_notification") is True, f"{cfg.get('macos_notification')}")
+            check("改 webhook 不会丢掉 rules",
+                  set(cfg.get("rules", {})) >= {"zero_yield_rounds", "source_fail_rounds"})
+
+            # ---- ② 写出来的必须能读回来（合法 JSON）----
+            on_disk = json.loads(alerting.CONFIG_FILE.read_text(encoding="utf-8"))
+            check("配置文件是合法 JSON 且落盘了", on_disk["webhook"]["enabled"] is True)
+            reread = alerting.load_config()
+            check("load_config 能读回刚写的值",
+                  reread["webhook"]["url"] == "https://example.com/hook",
+                  f"{reread['webhook'].get('url')}")
+
+            # ---- ③ 只改一个键，不能影响别的 ----
+            alerting.update_config(cooldown_seconds=60)
+            after = alerting.load_config()
+            check("改 cooldown 不影响 webhook 配置",
+                  after["webhook"]["enabled"] is True
+                  and after["webhook"]["url"] == "https://example.com/hook")
+            check("cooldown 已生效", after["cooldown_seconds"] == 60,
+                  f"{after['cooldown_seconds']}")
+
+            # ---- ④ 关 webhook 只关它自己 ----
+            alerting.update_config(webhook={"enabled": False})
+            off = alerting.load_config()
+            check("--off 只关 webhook，不动 macOS 通知",
+                  off["webhook"]["enabled"] is False
+                  and off["macos_notification"] is True)
+            check("--off 保留 url（下次开不用重填）",
+                  off["webhook"]["url"] == "https://example.com/hook",
+                  f"{off['webhook'].get('url')}")
+        finally:
+            alerting.CONFIG_FILE, alerting.STATE_FILE = orig_cfg, orig_state
+
+
 def test_schedule_avoids_commute() -> None:
     """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
 
@@ -2395,6 +2460,7 @@ def main() -> int:
         test_page_dead_not_swallowed,
         test_network_error_not_counted_as_empty,
         test_coverage_scope_matches_collection,
+        test_alert_config_update,
         test_policy_delays,
         test_rate_limit_detection,
         test_breaker,

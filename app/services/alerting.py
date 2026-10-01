@@ -283,3 +283,25 @@ def clear_suppression() -> int:
     n = len(_load_state())
     _save_state({})
     return n
+
+
+def update_config(**changes) -> dict:
+    """局部更新配置文件并返回新配置。
+
+    供 CLI 用（`alert --set-webhook` / `--off` / `--set-cooldown`）。
+    写文件而不是让用户手改 JSON —— 手改容易把 JSON 写坏，
+    而配置坏了告警会**静默失效**（load_config 会回退默认值，用户不会知道）。
+    """
+    cfg = load_config()
+    for k, v in changes.items():
+        if v is None:
+            continue
+        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+            cfg[k].update(v)
+        else:
+            cfg[k] = v
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return cfg
