@@ -454,6 +454,22 @@ def run_browser_batch(
        钉死在原地（同批型号 → 0 条 → 回退 → 同批型号…），实测京东
        因此原地空转了 3 个多小时。现在任务留在队列里下轮优先重做，
        游标继续前进覆盖更多型号。
+    9. **三类失败分开处置**（2026-10-02 加）—— 这是"归因正确性"的核心：
+
+           RateLimitError    风控惩罚   → 中止整批 + 登记冷却（推退避阶梯）
+           AuthExpiredError  登录失效   → 中止整批，**不**登记冷却，改发"重新登录"告警
+           EmptyResult       明确无结果 → **什么也不做**，只是不计入 empty_streak
+
+       为什么这很重要：三种失败在日志里**长得一模一样**（都是"这一轮 0 条"），
+       但处置方式完全不同。把登录失效当成风控 → 冷几小时，而问题只是没人扫码
+       （PDD 2026-10 之前就是"跳 login.html → 熔断 1 天 → 到期重试 → 还是
+       login.html → 冷更久"的无限循环）；把"真无货"当成被拦的证据 →
+       无货型号成了限流推断的燃料，退避阶梯被自己推高。
+    10. **新会话第一跳前先预热首页**（`policy.warmup`）。依据：同类项目
+        `jdcrawler/middlewares.py:189-205` 在拿到浏览器后、任何搜索之前先落
+        一次 `www.jd.com`；我们自己在拼多多侧也实测过"直接深链搜索页会被判
+        安全验证"。两件事天然对齐 —— `browser_worker` 每次回收重启正好
+        需要重新养热。
     """
     from ..services import breaker
     from ..services import task_queue as tq
@@ -504,10 +520,18 @@ def run_browser_batch(
     hit: Exception | None = None          # 命中的限流特征
     suspect_throttle = False              # 是否因"连续空结果"被判定限流
     recycle_for_session = False           # 是否因单会话上限需要换实例
+    auth_failed: Exception | None = None  # 登录态失效（与限流分开处置）
 
     while index < total:
         session_tasks = 0                 # 每次借页 = 一个新会话，计数重置
         with worker.page(site=site, viewport=viewport, user_agent=user_agent) as page:
+            # ---- 会话预热：每个**新会话**的第一跳之前先落一次首页 ----
+            # 放在这里而不是 `_search` 里：`worker.page()` 每次回收重启都是
+            # 一个新会话，预热与它天然对齐；放进 `_search` 会变成每个型号都预热
+            # （白白多一倍请求）。平台没配 `warmup_url` 时是空操作。
+            if index < total and not aborted:
+                policy.warmup(page, code)
+
             while index < total:
                 task = batch[index]
                 index += 1
@@ -521,8 +545,24 @@ def run_browser_batch(
                 # 放在**调用之前** —— 万一 search_fn 卡住，看门狗才知道
                 # 是从这一刻起没有进展的。
                 _heartbeat().note()
+                explicit_empty = False        # 平台**明确**表示无结果
                 try:
                     found = search_fn(page, product)
+                except policy.EmptyResult:
+                    # 平台明确无结果 —— **正常业务状态**，不是异常。
+                    # 不能在这里 `continue`：后面还有回收/间隔逻辑，
+                    # 统一走下面的 `elif explicit_empty` 分支。
+                    found = []
+                    explicit_empty = True
+                except policy.AuthExpiredError as exc:
+                    # ---- 登录态失效：中止整批，但**不**进熔断退避阶梯 ----
+                    # 理由见 `policy.AuthExpiredError` 与函数 docstring 第 9 条。
+                    # 中止是必须的：没登录时继续搜下去，每个型号都会
+                    # "0 条"，最后被 empty_streak 推断成"被限流" —— 归因指反。
+                    tq.mark_failed(task.task_id, f"登录失效：{exc.indicator}"[:80])
+                    auth_failed = exc
+                    note_stage("登录失效中止")
+                    break
                 except policy.RateLimitError as exc:
                     # ---- 熔断：不再"记一笔失败继续下一个" ----
                     tq.mark_failed(task.task_id, f"限流：{exc.indicator}"[:80])
@@ -582,6 +622,18 @@ def run_browser_batch(
                     logger.info(
                         "%s [%d/%d] %s → %d 条", label, index, total, product.model, len(found)
                     )
+                elif explicit_empty:
+                    # 平台明确无货 —— **不计入 empty_streak**。
+                    # `empty_streak` 是"推断被限流"的证据链，而"真的没货"
+                    # 恰恰不是证据。京东每轮只采 2 个型号、其中常有无货型号，
+                    # 把无货算进去等于每天都在自己制造"被限流"的证据。
+                    tq.mark_failed(task.task_id, "平台明确无结果")
+                    note_stage("明确无结果")
+                    logger.info(
+                        "%s [%d/%d] %s → 0 条（平台明确无货，**不**计入限流推断）",
+                        label, index, total, product.model,
+                    )
+                    net_streak = 0        # 页面正常，说明网络是通的
                 else:
                     tq.mark_failed(task.task_id, "搜索无结果")
                     empty_streak += 1
@@ -633,12 +685,31 @@ def run_browser_batch(
                 time.sleep(delay)
 
         # 出了 `with`：页面已归还，浏览器仍可复用
-        if aborted:
+        if aborted or auth_failed is not None:
             break
         if recycle_for_session:
             recycle_for_session = False
             if index < total:
                 worker.recycle("达到单会话任务上限")
+
+    # ---- 登录失效处置（**不**进熔断阶梯）----
+    if auth_failed is not None:
+        # 为什么不 trip：退避是"别再去撞平台"的机制，而登录失效时我们撞的
+        # 根本不是风控，是自己没登录。记进阶梯的表现就是"某源冷了几小时，
+        # 其实只是没人去扫码"。改走 auth 通道：写一条「需要重新登录」的标记
+        # + 一条醒目告警（这件事需要人，日志必须显眼）。
+        #
+        # 这里**不**销毁浏览器：会话本身没被污染，只是缺登录 Cookie；
+        # 重启解决不了，还白花 3 秒。下一次 `worker.page()` 仍会走
+        # `apply_session` 重新注入。
+        breaker.note_auth_expired(
+            code, getattr(auth_failed, "indicator", str(auth_failed)), label
+        )
+        logger.warning(
+            "已中止本批（采到第 %d/%d 个型号），未完成任务留在队列下轮优先重做；"
+            "**该源不会自动恢复**，需人工重新登录",
+            index, total,
+        )
 
     # ---- 熔断处置 ----
     if aborted and hit is not None:
@@ -675,13 +746,17 @@ def run_browser_batch(
     persisted = tq.load_quotes(code, day.isoformat(), batch_ids)
     merged = dedupe_quotes(persisted + fresh)
 
-    if not merged and not aborted:
+    if not merged and not aborted and auth_failed is None:
         logger.warning("%s 本轮 0 条报价；任务已留在队列，下一轮优先重做", label)
 
     # ---- 成功递减：退避阶梯余量减一级 ----
     # 判定规则见 `should_reset_backoff` —— 抽成纯函数是为了可断言，
     # 免得哪天被图省事改成 `if merged:`，退避阶梯就白设了。
-    if should_reset_backoff(len(merged), aborted, suspect_throttle):
+    # 登录失效时同样不算"成功" —— 把 `auth_failed is not None` 并进 aborted，
+    # 是为了**不改纯函数签名**（它的三个条件各有一条断言钉着）。
+    if should_reset_backoff(
+        len(merged), aborted or auth_failed is not None, suspect_throttle
+    ):
         before = breaker.consecutive_trips(code)
         if breaker.record_success(code) and before:
             after = breaker.consecutive_trips(code)
@@ -696,7 +771,9 @@ def run_browser_batch(
     logger.info(
         "%s 采集结束：%d 个型号 → %d 条报价，耗时 %.1fs%s",
         label, len(batch), len(merged), time.monotonic() - started,
-        "（限流中止）" if aborted else ("（网络故障中止）" if network_down else ""),
+        "（限流中止）" if aborted
+        else ("（登录失效中止）" if auth_failed is not None
+              else ("（网络故障中止）" if network_down else "")),
     )
     if stages:
         # 分段计数：出问题时一眼看出卡在哪一段。各段失败**表现都是 0 条**，

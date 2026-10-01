@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>三平台爬虫开源项目调研与优化建议 · 2026-10-01</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1a1d21; --ink2:#4a5158; --ink3:#7b838c;
+    --line:#e3e6ea; --accent:#1f6feb; --accent-soft:#eaf2ff;
+    --ok:#1a7f4b; --ok-soft:#e8f6ee;
+    --warn:#a35a00; --warn-soft:#fff4e2;
+    --bad:#b3261e; --bad-soft:#fdeceb;
+    --mono:"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 28px 96px}
+  header.top{
+    background:linear-gradient(135deg,#12233d 0%,#1f3c63 55%,#26558f 100%);
+    color:#fff;border-radius:16px;padding:34px 36px;margin-bottom:28px;
+    box-shadow:0 10px 30px rgba(18,35,61,.18);
+  }
+  header.top h1{margin:0 0 10px;font-size:27px;letter-spacing:.3px;font-weight:650}
+  header.top .sub{opacity:.86;font-size:14px;line-height:1.8}
+  header.top .meta{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px}
+  header.top .meta span{
+    background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.20);
+    padding:4px 11px;border-radius:999px;font-size:12.5px;
+  }
+  h2{
+    font-size:20px;margin:44px 0 16px;padding-bottom:10px;
+    border-bottom:2px solid var(--line);font-weight:640;
+  }
+  h2 .n{color:var(--accent);font-family:var(--mono);font-size:16px;margin-right:9px;font-weight:600}
+  h3{font-size:16.5px;margin:26px 0 10px;font-weight:640;color:#16324f}
+  p{margin:10px 0;color:var(--ink2)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:14px 0}
+  .lead{background:var(--accent-soft);border:1px solid #cfe1ff;border-radius:12px;padding:18px 22px;margin:16px 0}
+  .lead ol{margin:8px 0 0;padding-left:22px}
+  .lead li{margin:7px 0;color:#173a63}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.6px;background:var(--card)}
+  th,td{border:1px solid var(--line);padding:9px 11px;vertical-align:top;text-align:left}
+  th{background:#f0f3f7;font-weight:620;color:#243447;white-space:nowrap}
+  td code,p code,li code{background:#f0f3f7;padding:1.5px 5px;border-radius:4px;font-family:var(--mono);font-size:12.4px;color:#2b3b4e}
+  pre{
+    background:#141a22;color:#dbe4ee;padding:15px 17px;border-radius:10px;overflow-x:auto;
+    font-family:var(--mono);font-size:12.6px;line-height:1.62;margin:12px 0;
+  }
+  pre .c{color:#7f8fa3}
+  pre .k{color:#8fd3ff}
+  pre .s{color:#b6e3a2}
+  .tag{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:620;line-height:1.6}
+  .t-p0{background:var(--bad-soft);color:var(--bad);border:1px solid #f3c8c5}
+  .t-p1{background:var(--warn-soft);color:var(--warn);border:1px solid #f0d8b0}
+  .t-p2{background:var(--accent-soft);color:var(--accent);border:1px solid #cfe1ff}
+  .t-no{background:#eef0f2;color:var(--ink3);border:1px solid #dcdfe3}
+  .t-ok{background:var(--ok-soft);color:var(--ok);border:1px solid #bfe4cf}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  @media(max-width:820px){.grid2,.grid4{grid-template-columns:1fr}}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;text-align:center}
+  .stat b{display:block;font-size:23px;color:var(--accent);font-family:var(--mono);font-weight:640}
+  .stat span{font-size:12.5px;color:var(--ink3)}
+  .rec{border-left:4px solid var(--accent);background:var(--card);border:1px solid var(--line);border-left-width:4px;border-radius:10px;padding:18px 20px;margin:16px 0}
+  .rec.p0{border-left-color:var(--bad)}
+  .rec.p1{border-left-color:var(--warn)}
+  .rec.p2{border-left-color:var(--accent)}
+  .rec h4{margin:0 0 4px;font-size:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-weight:640}
+  .rec .body{margin-top:10px}
+  .kv{font-size:13.6px;margin:5px 0;color:var(--ink2)}
+  .kv b{color:#243447;font-weight:620}
+  blockquote{margin:12px 0;padding:10px 16px;border-left:3px solid var(--accent);background:#f4f7fb;color:#2a415c}
+  .note{font-size:13px;color:var(--ink3);font-style:normal}
+  .evidence{background:#fbfcfd;border:1px dashed #cfd6dd;border-radius:9px;padding:12px 15px;margin:11px 0;font-size:13.4px}
+  .evidence b{color:#16324f}
+  ul.tight{margin:8px 0;padding-left:20px}
+  ul.tight li{margin:5px 0;color:var(--ink2)}
+  hr.sep{border:0;border-top:1px solid var(--line);margin:36px 0}
+  .foot{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:12.8px;color:var(--ink3);line-height:1.85}
+  .yes{color:var(--ok);font-weight:620}
+  .no{color:var(--bad);font-weight:620}
+  @media print{
+    body{background:#fff}
+    header.top{box-shadow:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .card,.rec,.stat,.lead{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    h2{page-break-after:avoid}
+    .rec,table,.card{page-break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <h1>京东 / 拼多多 / 闲鱼 爬虫开源项目调研与优化建议</h1>
+  <div class="sub">
+    调研 10 个 GitHub 公开项目，归纳出 4 条技术路线，逐条与 <b>DIY价格汇报</b> 现有实现对照，<br>
+    给出按投入产出比排序的优化清单 —— 以及一份「<b>看似优化、实则自毁</b>」的清单。
+  </div>
+  <div class="meta">
+    <span>调研日期 2026-10-01</span>
+    <span>证据来源：GitHub 原始源码（已逐文件核对）</span>
+    <span>样本 10 个仓库</span>
+    <span>对比基线：本项目 2026-10-01 实测日志</span>
+    <span>优化项 23 条（值得做 14 / 有条件 2 / 不做 7）</span>
+    <span>核对中发现并修复 2 个真实缺陷</span>
+    <span>优化项已落地 6 / 实测否决 3 / 关闭 1</span><span>另修 2 处退避机制失效</span>
+  </div>
+</header>
+
+<div class="lead" style="background:#fdeceb;border-color:#f3c8c5">
+  <b style="color:#b3261e">⚠️ 核对过程中发现两个真实缺陷（与本次调研无关，但更紧急）</b>
+  <p style="margin:10px 0 0;color:#7a1a15">
+    <b>①  限流误判</b>（已修 <code>923ff0d</code>）：错误码 <code>40001</code> 被当裸字符串搜整页正文，
+    命中了显卡型号 <b>RTX A4000 16G</b> 的标题 —— 今天<b>误熔断 2 次</b>，每次中止整批并推进退避阶梯。<br>
+    <b>②  万元价丢失</b>（已修 <code>7f8fccb</code>）：闲鱼把 <code>2.30万</code> 拆成三行渲染
+    （<code>¥</code> / <code>2</code> / <code>.30</code> / <code>万</code>），提取器只取「¥ 的下一行」→
+    <b>记成 ¥2.00</b> 后被数据质量闸门丢掉，净效果是<b>所有万元级二手报价被静默丢弃</b>。<br>
+    两者的完整证据链见 <b>第 09 / 10 节</b>。
+  </p>
+</div>
+
+<div class="lead">
+  <b>结论速览</b>
+  <ol>
+    <li><b>最大的优化空间在「取数方式」，不在「反爬对抗」。</b>我们三个源都在解析 <code>innerText</code>；而这些平台自己就发结构化 JSON（闲鱼 MTop、拼多多 <code>apiv3.yangkeduo.com</code>），浏览器已经收到过——我们只是没接。</li>
+    <li><b>拼多多的 <code>anti-content</code> 不要去逆向。</b>公开的破解产物（3720 行反混淆 JS + 补环境）是 2022 年的，已明显过期；现在通行的做法是<b>让浏览器自己签名</b>。</li>
+    <li><b>闲鱼是单轮耗时的大头（约 85%）。</b>今日实测 15 个型号耗时 390s / 411s（26~27s/型号），其中相当部分是为了"看起来像人"而付出的页面渲染成本。</li>
+    <li><b>我们已经在若干维度上领先于这些项目。</b>指纹七组对照实测、熔断跨进程持久化、单会话任务上限、磁盘冷启动清理、数据口径闸门——调研的 10 个项目<b>没有一个全都具备</b>。</li>
+    <li><b>代理池与多账号轮换：建议不做。</b>理由不是"做不到"，而是我们<b>带登录态</b>且目标是国内站，境外 IP 会直接触发风控的账号盗用判定。</li>
+    <li>从它们代码里可提炼出<b>值得做的共 14 项</b>（另有 2 项有条件、7 项明确不做）——完整编号清单见<b>第 08 节</b>。</li>
+  </ol>
+</div>
+
+<h2><span class="n">01</span>调研样本</h2>
+<p>按"与我们的场景相关度"筛选，覆盖闲鱼/京东/拼多多三条线、四种主流技术路线。<span class="note">星级与更新时间为调研时点数据。</span></p>
+
+<table>
+<thead>
+<tr><th>仓库</th><th>★</th><th>最近推送</th><th>覆盖平台</th><th>技术路线</th></tr>
+</thead>
+<tbody>
+<tr><td><code>superboyyy/xianyu_spider</code></td><td>867</td><td>2026-09-18</td><td>闲鱼（+ IM 长连接）</td><td><b>HTTP API + 签名</b></td></tr>
+<tr><td><code>pbeenigg/LittleCrawler</code></td><td>758</td><td>2026-08-09</td><td>小红书 / 知乎 / 闲鱼</td><td><b>浏览器 + 签名机（混合）</b></td></tr>
+<tr><td><code>ShilongLee/Crawler</code></td><td>1449</td><td>2026-09-24</td><td>抖音/快手/B站/小红书/淘宝/<b>京东</b>/微博</td><td>HTTP + 代理池 + Cookie</td></tr>
+<tr><td><code>LoseNine/Crack-JS-Spider</code></td><td>1040</td><td>2024-05-03</td><td><b>拼多多 anti_content</b>、极验滑块等</td><td><b>JS 逆向 + 补环境</b></td></tr>
+<tr><td><code>SZFsir/pddSpider</code></td><td>317</td><td>2022-06-17</td><td>拼多多</td><td><b>浏览器 + MITM 代理截获</b></td></tr>
+<tr><td><code>hiddendevj/JDPackage</code></td><td>405</td><td>2021-12-06</td><td>京东（登录/领券/抽奖）</td><td>JS 引擎执行（PyV8）</td></tr>
+<tr><td><code>FearlessPeople/xianyu_spider</code></td><td>456</td><td>2025-06-30</td><td>闲鱼 APP（<b>已废弃</b>）</td><td>APP 接口</td></tr>
+<tr><td><code>wkunzhi/Python3-Spider</code></td><td>3401</td><td>2023-11-03</td><td>拼多多登录参数、滑块、多站</td><td>教学合辑</td></tr>
+<tr><td><code>DropsDevopsOrg/ECommerceCrawlers</code></td><td>5704</td><td>2024-05-22</td><td>淘宝/闲鱼/点评等</td><td>教学合辑</td></tr>
+<tr><td><code>Jack-Cherish/python-spider</code></td><td>19781</td><td>2024-08-19</td><td>淘宝/京东/网易云等</td><td>教学合辑</td></tr>
+</tbody>
+</table>
+
+<p class="note">说明：后 3 个是高星教学合辑，代码年代偏早、以演示为主，本次只取"思路"不取"实现"。</p>
+
+<h2><span class="n">02</span>四条技术路线</h2>
+
+<div class="grid2">
+  <div class="card">
+    <span class="tag t-ok">路线 A</span> <b>HTTP API + 签名</b>
+    <p style="margin-top:8px">直接调平台的 H5 接口，自己算签名。代表：<code>superboyyy/xianyu_spider</code>。</p>
+    <ul class="tight">
+      <li>速度极快、拿的是结构化 JSON</li>
+      <li>签名一旦改版就要重写</li>
+      <li>需要自己维护 Cookie / token 生命周期</li>
+    </ul>
+  </div>
+  <div class="card">
+    <span class="tag t-no">路线 B</span> <b>JS 逆向 + 补环境</b>
+    <p style="margin-top:8px">把加密 JS 抠出来反混淆，用 Node/PyV8 在补好的浏览器环境里跑。代表：<code>Crack-JS-Spider</code>、<code>JDPackage</code>。</p>
+    <ul class="tight">
+      <li>无浏览器，资源占用最低</li>
+      <li><b>维护成本最高</b>，每次改版要重新逆向</li>
+      <li>产物易过期（样本已过期 3 年）</li>
+    </ul>
+  </div>
+  <div class="card">
+    <span class="tag t-p1">路线 C</span> <b>浏览器 + MITM 代理截获</b>
+    <p style="margin-top:8px">浏览器正常访问，本地代理截获它的 API 响应。代表：<code>SZFsir/pddSpider</code>（还顺手改写了 JS 剥掉 <code>navigator.webdriver</code>）。</p>
+    <ul class="tight">
+      <li>不碰 DOM、不碰签名</li>
+      <li>拿结构化数据，对页面改版免疫</li>
+      <li>代理层要自己维护</li>
+    </ul>
+  </div>
+  <div class="card">
+    <span class="tag t-p1">路线 D</span> <b>浏览器当"签名机"</b>
+    <p style="margin-top:8px">开一个官方页面，调用它<b>页面内的原生签名函数</b>，再走 HTTP 取数。代表：<code>LittleCrawler</code> 的 <code>playwright_sign.py</code>。</p>
+    <ul class="tight">
+      <li>不逆向、不补环境，签名永远是最新的</li>
+      <li>速度接近路线 A</li>
+      <li>保留一个浏览器上下文</li>
+    </ul>
+  </div>
+</div>
+
+<h3>路线 C/D 的关键代码证据</h3>
+<p>这两条路线最值得借鉴，摘录其原始实现：</p>
+
+<pre><span class="c"># ── 路线 D：LittleCrawler 借用页面原生函数签名（不逆向） ──</span>
+<span class="c"># src/platforms/xhs/playwright_sign.py</span>
+async def call_mnsv2(page, sign_str, md5_str):
+    <span class="c"># 直接在官方页面上下文里调用它的签名函数</span>
+    return await page.evaluate(<span class="s">f"window.mnsv2('{sign_str}', '{md5_str}')"</span>)
+
+<span class="c"># ── 路线 C：SZFsir/pddSpider 用 MITM 代理读 API 响应 ──</span>
+<span class="c"># Spider.py —— 不做 DOM 解析，直接从代理流量里取 JSON</span>
+if response.request.hostname == <span class="s">'apiv3.yangkeduo.com'</span> and response.status == 200:
+    pa = re.compile(r<span class="s">'v4/operation/[0-9]*/groups'</span>)
+    if pa.findall(response.request.path):
+        parse_tp.put(parse.parse_goods, (json.loads(response.get_body_data(...)), ...))
+</pre>
+
+<h2><span class="n">03</span>逐项目剖析</h2>
+
+<h3>① <code>superboyyy/xianyu_spider</code> — 闲鱼 API 直连（与本项目同平台，最值得细读）</h3>
+<div class="evidence">
+<b>它的搜索不走浏览器。</b>浏览器（Playwright）只在<b>扫脸认证</b>时用一次；日常搜索是 <code>httpx</code> 直连 MTop 接口。
+</div>
+
+<pre><span class="c"># xianyu/mtop.py（已核对原文）</span>
+BASE_URL = <span class="s">"https://h5api.m.goofish.com/h5/{}/1.0/"</span>
+APPKEY   = <span class="s">"34839810"</span>
+SEARCH_API = <span class="s">"mtop.taobao.idlemtopsearch.pc.search"</span>     <span class="c"># 注意：pc.search —— 就是 PC 网页调的那个接口</span>
+
+def generate_sign(token, appkey, data, j):
+    <span class="c"># sign = md5(token & 时间戳毫秒 & appkey & 紧凑JSON(data))</span>
+    return md5(<span class="s">f"{token}&amp;{j}&amp;{appkey}&amp;{json.dumps(data,separators=(',',':'))}"</span>)
+
+def _h5_token():
+    <span class="c"># token 就是 _m_h5_tk Cookie 的前半段</span>
+    return _cookie_value(<span class="s">"_m_h5_tk"</span>).split(<span class="s">"_"</span>)[0]
+</pre>
+
+<div class="kv"><b>token 怎么来的：</b>先带 <code>token="undefined"</code> 请求一次"公告页"接口（<code>mtop.gaia...index.get</code>），响应里下发 <code>_m_h5_tk</code> Cookie，之后每次请求用它签名。</div>
+<div class="kv"><b>token 过期怎么办：</b>响应 <code>ret</code> 含 <code>TOKEN_EXPIRED</code> 或 <code>FAIL_SYS</code> 时，重新走一次上面的取 token 流程，<b>然后重试一次</b> —— 只重试一次，不循环。</div>
+<div class="kv"><b>登录态失效怎么办：</b>清掉登录 Cookie，但<b>保留</b> <code>_m_h5_tk / _m_h5_tk_enc / cna</code> 三个匿名 Cookie，搜索<b>按未登录继续</b>，结果里标 <code>login_expired</code>。<span class="yes">这个"降级而不失败"的设计值得抄。</span></div>
+
+<h3>② <code>pbeenigg/LittleCrawler</code> — 工程化最完整的一个</h3>
+<p>它是唯一同时具备"CDP 浏览器管理 + 代理池 + 缓存抽象 + 签名模块 + REST API + Web UI"的项目。最值得看的是 <code>cdp_browser.py</code> 与 <code>playwright_sign.py</code>。</p>
+
+<table>
+<thead><tr><th>模块</th><th>它的做法</th><th>对我们的参考价值</th></tr></thead>
+<tbody>
+<tr><td><code>playwright_sign.py</code></td><td>用 <code>page.evaluate("window.mnsv2(...)")</code> 借页面签名</td><td class="yes">高 —— 拼多多 anti-content 的正解</td></tr>
+<tr><td><code>easing.py</code> + <code>slider_util.py</code></td><td>缓动函数生成滑块轨迹（<code>ease_out_expo</code> 等）</td><td class="no">低 —— 我们明确不做滑块脚本化</td></tr>
+<tr><td><code>cdp_browser.py</code></td><td>CDP 连接已有浏览器、可复用 context、<code>stealth.min.js</code> 注入</td><td>中 —— 与我们的 session 层同类，但我们的更贴合 macOS</td></tr>
+<tr><td><code>proxy_ip_pool.py</code></td><td>多供应商（极速/快代理/豌豆）统一抽象 + <code>proxy_mixin</code> 混入</td><td class="no">低 —— 见第 05 节"不做代理池"</td></tr>
+<tr><td><code>services/cache/</code></td><td>本地 / Redis 双实现的抽象层</td><td>中 —— 可参考其"抽象 + 工厂"的写法</td></tr>
+</tbody>
+</table>
+
+<h3>③ <code>ShilongLee/Crawler</code> — 京东这条线的参照系</h3>
+<pre><span class="c"># service/jd/logic/search.py —— 它的京东搜索就是"带 Cookie 抓 HTML"</span>
+url = <span class="s">f'https://search.jd.com/Search?keyword={keyword}&amp;page={page}'</span>
+headers = {<span class="s">'cookie'</span>: cookie, **COMMON_HEADERS}     <span class="c"># 完整 Sec-Ch-Ua/Sec-Fetch 头</span>
+resp = await requests.get(url, headers=headers)
+soup = BeautifulSoup(resp.text, <span class="s">"html.parser"</span>)           <span class="c"># 解析 li.gl-item</span>
+</pre>
+<div class="kv"><b>值得注意的两点：</b></div>
+<ul class="tight">
+  <li><b>过期账号机制</b>：接口 <code>/jd/expire_account</code> 把失效 Cookie 的账号标记后不再使用 —— 这是<b>账号粒度的熔断</b>。我们的熔断是<b>平台粒度</b>。因为我们都只有一个账号，账号级熔断价值有限，但这个"把失效凭据显式标记、不再尝试"的思路与我们一致。</li>
+  <li><b>代理轮换算法极简</b>：<code>proxies[int(time.time()/300) % len(proxies)]</code> —— 按 5 分钟时间片轮换。简单，但不管代理是否可用。</li>
+</ul>
+
+<h3>④ <code>LoseNine/Crack-JS-Spider</code> — 拼多多 anti_content 的破解产物（反面教材）</h3>
+<pre><span class="c"># 拼多多/anti_content.js 实测规模</span>
+3717 行 · 179 KB · 首行 <span class="s">window=global;</span> · 第 3 行注释「<span class="s">补环境代码已注释</span>」
+</pre>
+<div class="evidence">
+<b>结论：这条路不要走。</b>该产物是 2022 年 2 月的，需要"补环境"（把浏览器 DOM/BOM 补齐）才能跑，而<b>补环境代码本身已被作者注释掉</b>——它是个教学样本，不是可运行的方案。更关键的是：拼多多的签名逻辑这几年改过多轮，<b>这类产物天然带保质期</b>。
+</div>
+<p>对比之下，<code>LittleCrawler</code> 的做法（路线 D，借浏览器签名）<b>永远不需要重新逆向</b>——签名逻辑由页面自己维护。</p>
+
+<h3>⑤ <code>SZFsir/pddSpider</code> — 已失效，但留下最有价值的一条思路</h3>
+<div class="evidence">
+作者自己在 README 里写明：<b>"我的代码已经被拼多多的反爬策略过滤了"</b>。他们的应对手段是双重的：<b>① MITM 代理读 API 响应；② 运行时改写 JS，把 <code>navigator.webdriver</code> 替换成随机名</b>。
+</div>
+<pre><span class="c"># Spider.py —— 在代理层改写回包里的 JS</span>
+if <span class="s">'react_psnl_verification_'</span> in response.request.path:
+    js_body = response.get_body_data().decode()
+    js_body = js_body.replace(<span class="s">"navigator.webdriver"</span>, <span class="s">"navigator.qwerasdfzxcv"</span>)
+    response.set_body_data(bytes(js_body, <span class="s">'utf-8'</span>))
+</pre>
+<div class="kv"><b>关于这个技巧的评价：</b>它针对的是 <b>Selenium 驱动</b>的浏览器（Selenium 会注入 <code>navigator.webdriver=true</code>）。我们<b>不是</b> Selenium，也不是 Playwright 的 <code>launch()</code>——我们是自己 <code>Popen</code> 启动普通 Chrome 再用 CDP 连接，<b>本来就没有这个特征</b>。所以这个技巧对我们<b>无收益</b>（详见第 05 节）。但它验证了一件事：<b>网络层才是数据的可靠通道。</b></div>
+
+<h2><span class="n">04</span>与我们的对照</h2>
+
+<p>下表把我们现有实现与调研结论逐维度对照。<span class="yes">绿=我们更强</span>，<span class="no">红=存在明确改进空间</span>。</p>
+
+<table>
+<thead>
+<tr><th style="width:16%">维度</th><th style="width:40%">我们现在的做法</th><th style="width:44%">开源项目的普遍做法 / 差距</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><b>取数方式</b></td>
+  <td><span class="no">DOM 解析</span>：京东用 <code>locator('[class*="goodsCardWrapper"]')</code>；拼多多/闲鱼用 <code>page.evaluate()</code> 拆 <code>innerText</code> 行</td>
+  <td><b>主流是读网络层</b>：MITM 代理截 API 响应（路线 C）或直接调 API（路线 A）。<b>对页面改版免疫</b>，且能拿到 DOM 上根本看不到的字段</td>
+</tr>
+<tr>
+  <td><b>签名处理</b></td>
+  <td>不处理 —— 让浏览器自己发请求，签名天然正确</td>
+  <td>逆向（易过期）或"借浏览器签名"（路线 D）。<b>我们的选择是对的</b>，但代价是必须等整页渲染</td>
+</tr>
+<tr>
+  <td><b>反指纹</b></td>
+  <td><span class="yes">已实测七组对照</span>（真实页面卡片数 + 风控判定），明确拒绝 headless / 拦图片 / 关 GPU，并记录了每项的实测数据</td>
+  <td>普遍是"凭经验加一堆参数"，<b>没有任何一个项目给出对照实测数据</b>。<code>LittleCrawler</code> 加了 <code>--no-sandbox</code>（Linux 习惯）与 <code>AutomationControlled</code> 补丁，对我们是负收益</td>
+</tr>
+<tr>
+  <td><b>节奏控制</b></td>
+  <td><span class="yes">平台差异化</span>：高斯扰动 + 上下限夹取 + 长停顿概率，三平台各不相同</td>
+  <td>多数是固定 <code>sleep</code> 或 <code>random.uniform</code>；<code>ShilongLee</code> 的京东搜索<b>完全没有间隔控制</b></td>
+</tr>
+<tr>
+  <td><b>熔断</b></td>
+  <td><span class="yes">平台粒度 + 跨进程持久化</span>（<code>data/breaker.json</code>）+ 软/硬双阶梯</td>
+  <td>基本没有熔断。有熔断的（<code>ShilongLee</code>）是<b>账号粒度</b>且仅内存态</td>
+</tr>
+<tr>
+  <td><b>会话生命周期</b></td>
+  <td><span class="yes">单会话任务上限 + 频次/时长双重回收 + 轮次结束彻底关闭浏览器</span></td>
+  <td>普遍是"一个浏览器跑到底"，或常驻浏览器不关</td>
+</tr>
+<tr>
+  <td><b>磁盘治理</b></td>
+  <td><span class="yes">磁盘缓存外置到临时目录 + 每轮清理 profile 白名单子目录</span></td>
+  <td><b>10 个项目没有一个做这个</b>。长期跑的项目普遍存在 profile 无限膨胀</td>
+</tr>
+<tr>
+  <td><b>断点续爬</b></td>
+  <td><span class="yes">队列 + 每型号落盘 + 生命周期路由 + 崩溃恢复</span></td>
+  <td>多为"一次跑完，失败重来"</td>
+</tr>
+<tr>
+  <td><b>代理池</b></td>
+  <td>无（<b>有意为之</b>，见第 05 节）</td>
+  <td>有（<code>LittleCrawler</code> 多供应商、<code>ShilongLee</code> 时间片轮换）</td>
+</tr>
+<tr>
+  <td><b>数据质量闸门</b></td>
+  <td><span class="yes">三源过滤 + 平台集合 Jaccard ≥0.5 + 样本量闸门</span></td>
+  <td>几乎没有 —— 抓到什么存什么</td>
+</tr>
+<tr>
+  <td><b>可观测性</b></td>
+  <td>有熔断状态、排除计数（<code>stale_excluded</code> 等）</td>
+  <td><code>superboyyy</code> 用 <code>ws_frames / sync_pushes / parsed</code> <b>三个分段计数</b>区分"没推到"还是"推到了没解开"——<b>这个思路可以借鉴</b></td>
+</tr>
+</tbody>
+</table>
+
+<h2><span class="n">05</span>优化建议（按投入产出比排序）</h2>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">P0</span>取数方式：从 DOM 解析改为「网络响应截获」</h4>
+  <div class="body">
+    <div class="kv"><b>现状问题：</b>三个源都靠解析 <code>innerText</code>。京东依赖 <code>[class*="goodsCardWrapper"]</code> 这类<b>模糊类名选择器</b>，拼多多/闲鱼靠按行切分文本推断价格——<b>平台改一次版就可能全线失灵</b>，而且价格与标题的边界靠行序，本身就是脆弱假设。</div>
+    <div class="kv"><b>建议方案：</b>保留现有浏览器流程不动，只把<b>取数那一层</b>换成监听页面自己发出的 API 响应（<code>page.on("response")</code> / <code>expect_response</code>），DOM 解析作为兜底保留。</div>
+    <div class="evidence">
+      <b>外部证据（已核对源码）：</b><br>
+      · 闲鱼：页面调用 <code>mtop.taobao.idlemtopsearch.pc.search</code>，返回结构化 JSON（<code>data.resultList[].data.item.main</code>，含 title / price / area / userNickName / publishTime）<br>
+      · 拼多多：页面调用 <code>apiv3.yangkeduo.com</code> 的 <code>v4/operation/*/groups</code>，返回 <code>goods_list</code><br>
+      · 京东：桌面搜索页是<b>服务端渲染 HTML</b> —— <span style="color:#b3261e"><b>⚠️ 2026-10-02 实测推翻</b></span>：服务端 HTML 只有 47KB、零商品，商品数据在 <code>api.m.jd.com/api?appid=search-pc-java</code> 的明文 JSON 里（详见第 12 节）
+    </div>
+    <div class="kv"><b>预期收益：</b>① 改版免疫（选择器失效风险→0）；② 可提前取数，响应到达即可解析，<b>不必等整页渲染完成</b>，单型号可省数秒；③ 拿到 DOM 上看不到的字段（发布时间、地区、卖家），可用于后续筛选。</div>
+    <div class="kv"><b>成本与风险：</b>改动<b>限于取数函数</b>，不动调度/熔断/生命周期。风险是接口返回字段名可能变动，需要开发时实测确认——<b>这一条我尚未在本项目环境实测验证</b>，属推断（依据是外部项目的抓取路径）。</div>
+    <div class="kv"><b>建议验证顺序：</b>先在<b>闲鱼单个型号</b>上试（收益最大），成功后再推拼多多。</div>
+  </div>
+</div>
+
+<div class="rec p1">
+  <h4><span class="tag t-p1">P1</span>闲鱼单轮耗时：评估能否绕开整页渲染</h4>
+  <div class="body">
+    <div class="kv"><b>现状（今日实测，非估算）：</b>
+      <table style="margin:8px 0">
+        <tr><th>轮次</th><th>型号数</th><th>耗时</th><th>均摊</th></tr>
+        <tr><td>19:37:44 闲鱼</td><td>15</td><td>390.1s</td><td>26.0 s/型号</td></tr>
+        <tr><td>21:37:54 闲鱼</td><td>15</td><td>410.8s</td><td>27.4 s/型号</td></tr>
+        <tr><td>20:31:35 拼多多</td><td>6</td><td>43.8s</td><td>7.3 s/型号</td></tr>
+        <tr><td>21:31:03 京东</td><td>2</td><td>57.0s</td><td>28.5 s/型号</td></tr>
+      </table>
+      闲鱼一轮 6.5~6.8 分钟，是全轮的绝对大头。
+    </div>
+    <div class="kv"><b>这笔时间花在哪：</b>拆开看，<code>navigate</code> + 显式首屏等待 + 滚动等待 2500ms + 行为模拟 + settle，<b>页面渲染相关约 12~15s</b>；其余是<b>有意的拟人化间隔</b>（这部分<b>不能省</b>，省了就是自找限流）。</div>
+    <div class="kv"><b>可优化的是前者：</b>用 P0 的网络截获后，<b>命中搜索接口响应即可结束等待</b>，不必等 SPA 把卡片渲染出来。</div>
+    <div class="kv"><b>明确不建议的：</b>不要自研 MTop 签名改走纯 HTTP。理由：签名规则会变，改一次就要重读源码；而"截获页面自己的响应"拿到的数据完全相同，<b>却不承担签名维护成本</b>。</div>
+    <div class="kv"><b>可顺带借鉴：</b><code>superboyyy</code> 的<b>单次重试</b>策略 —— token 过期时刷新一次并重试，失败就直接返回，<b>不进入循环</b>。与我们"不撞墙"的原则一致。</div>
+  </div>
+</div>
+
+<div class="rec p1">
+  <h4><span class="tag t-p1">P1</span>拼多多 anti-content：若将来要脱离浏览器，用「签名机」而不是逆向</h4>
+  <div class="body">
+    <div class="kv"><b>现状问题：</b>我们目前不主动构造请求（浏览器自己发，签名天然正确），所以<b>当前没有这个痛点</b>。但拼多多是限流最重的源，若将来想做"轻量轮询"或提高频率，就会遇到必须自己签名的场景。</div>
+    <div class="kv"><b>建议方案：</b>采用路线 D —— 开一个官方页面，<code>page.evaluate()</code> 调它<b>页面内的签名函数</b>拿到 <code>anti-content</code>，再用 httpx 发请求。</div>
+    <div class="evidence">
+      <b>证据：</b><code>LittleCrawler</code> 用这一方法处理小红书的 <code>x-s</code> 签名（<code>window.mnsv2(...)</code>），代码仅 226 行且<b>不随平台改版失效</b>。<br>
+      对照：<code>Crack-JS-Spider</code> 的拼多多产物是 3717 行反混淆 JS + 补环境，2022 年产、<b>补环境代码已注释、当前不可直接运行</b>。
+    </div>
+    <div class="kv"><b>何时才做：</b>仅当"必须主动构造请求"成为真实需求时。现在不做。</div>
+  </div>
+</div>
+
+<div class="rec p2">
+  <h4><span class="tag t-p2">P2</span>可观测性：用「分段计数」替代布尔判断</h4>
+  <div class="body">
+    <div class="kv"><b>可借鉴的点：</b><code>superboyyy</code> 用三个计数 <code>ws_frames</code>（收到多少帧）/ <code>sync_pushes</code>（服务端推了多少次）/ <code>parsed</code>（解出多少条）来<b>区分"没推到"和"推到了但没解开"</b>——而不是笼统一句"连接失败"。</div>
+    <div class="kv"><b>用在我们哪里：</b>采集链路可以按同样思路拆：<code>navigate 成功数 → 页面就绪数 → 命中数据接口数 → 解析成功数 → 入库数</code>。这样"这个源今天数据少"能立刻定位到<b>是哪一段漏了</b>，而不是回去翻日志猜。</div>
+    <div class="kv"><b>成本：</b>很低。每轮结束在 <code>summary</code> 里多带一组计数即可。</div>
+    <div class="kv"><b>为什么值得：</b>我们已经吃过"跑了一整天 0 条没人知道"的亏（09-29 代理事故）。分段计数正是让这类故障<b>在第一条日志里就现形</b>。</div>
+  </div>
+</div>
+
+<div class="rec p2">
+  <h4><span class="tag t-p2">P2</span>熔断粒度：跨轮次指数退避</h4>
+  <div class="body">
+    <div class="kv"><b>已知缺口（上一轮就发现了）：</b>京东冷却 180s，而采集是每小时一轮 —— <b>冷却在下一轮开始前早就自然过期了</b>，所以每个小时仍会去撞一次。</div>
+    <div class="kv"><b>建议方案：</b>连续 N 轮触发熔断 → 冷却时长指数拉长（180s → 30min → 2h）。判定依据落在 <code>breaker.json</code> 的 <code>trips</code> 计数上，改动很小。</div>
+    <div class="kv"><b>对照：</b>调研项目中<b>没有</b>跨轮次退避的实现（它们多是单次运行脚本，不存在"轮次"概念）。这一条是我们独有的场景，需要自己设计。</div>
+  </div>
+</div>
+
+<div class="rec p2">
+  <h4><span class="tag t-no">不做</span>代理池 —— 评估后建议放弃</h4>
+  <div class="body">
+    <div class="kv"><b>开源项目的做法：</b><code>LittleCrawler</code> 封装了极速/快代理/豌豆三个供应商的统一池；<code>ShilongLee</code> 按 5 分钟时间片轮换。</div>
+    <div class="kv"><b>我们为什么不做：</b></div>
+    <ul class="tight">
+      <li><b>我们是带登录态的采集。</b>代理一换，平台看到的是"同一个账号从不同 IP 高频访问"——这正是风控模型里<b>账号盗用</b>的典型特征，比固定 IP 更危险。</li>
+      <li><b>目标站是国内的。</b>用境外节点等于自己制造异常；用国内住宅代理则成本高、质量参差。</li>
+      <li><b>收益不明确。</b>当前限流的主要特征是"搜索级软风控"（登录态正常、搜索结果被降级），换 IP 未必能解决——<b>这一点我们尚未验证</b>，但"不确定收益 + 明确风险"足够支持不做。</li>
+    </ul>
+    <div class="kv"><b>什么时候重新评估：</b>若京东/拼多多长期限流且已排除所有非 IP 因素（节奏、指纹、登录态），再考虑<b>与登录态绑定的国内住宅代理</b>。</div>
+  </div>
+</div>
+
+<div class="rec p2">
+  <h4><span class="tag t-no">不做</span>多账号轮换 / 滑块脚本化 / 隐指纹补丁</h4>
+  <div class="body">
+    <ul class="tight">
+      <li><b>多账号轮换</b>：需要多个实名账号。<code>ShilongLee</code> 支持多账号（<code>/add_account</code>），但它面向的是"账号越多越稳"的通用爬虫场景；我们是单一账号的价格追踪，多账号带来的合规与维护成本远超收益。<b>不做。</b></li>
+      <li><b>滑块验证码脚本化</b>：<code>LittleCrawler</code> 有完整的缓动轨迹实现，<code>wkunzhi</code> 有滑块验证教学。但滑块是平台明确的安全控制，<b>脚本化本身就是被检测的行为特征</b>。我们现有策略（人工扫码 + 会话复用）是对的。<b>不做。</b></li>
+      <li><b>反指纹补丁</b>（<code>--disable-blink-features=AutomationControlled</code> / <code>stealth.min.js</code> / JS 改写 <code>navigator.webdriver</code>）：这些针对的是 <b>Selenium / Playwright.launch() 注入的自动化特征</b>。我们是<b>自己 Popen 启动普通 Chrome 再用 CDP 连接</b>，本来就没有这些特征 —— 加上补丁等于<b>主动断言"我在做自动化"</b>。上一轮已有实测结论，<b>不加。</b></li>
+      <li><b><code>--no-sandbox</code></b>：<code>LittleCrawler</code> 加了，但这是 Linux 容器环境的习惯；macOS 上无必要且降低隔离性。<b>不加。</b></li>
+    </ul>
+  </div>
+</div>
+
+<h2><span class="n">06</span>建议的推进顺序</h2>
+
+<table>
+<thead><tr><th style="width:6%">序</th><th style="width:32%">动作</th><th style="width:24%">验证方式</th><th>为什么是这个顺序</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>在<b>闲鱼单个型号</b>上抓一次页面网络流量，确认搜索接口路径与响应结构</td><td>真实浏览器跑 1 个型号，打印命中的 XHR 列表</td><td>零风险、<b>5 分钟出结论</b>。结论直接决定 P0 是否成立</td></tr>
+<tr><td>2</td><td>若成立 → 闲鱼取数改为「响应截获 + DOM 兜底」</td><td>同一型号对比两种方式的价格是否一致</td><td>收益最大（闲鱼占全轮 85%）</td></tr>
+<tr><td>3</td><td>拼多多照做</td><td>同上</td><td>拼多多限流最重，先解决取数可减少"重试次数"</td></tr>
+<tr><td>4</td><td>加分段计数到轮次 summary</td><td>下一轮日志即可看到</td><td>成本极低，且是后续所有优化的观测基础</td></tr>
+<tr><td>5</td><td>熔断跨轮次指数退避</td><td>连续两轮触发后看冷却时长是否拉长</td><td>已有的明确缺口（180s 对小时级轮次无效）</td></tr>
+<tr><td>—</td><td colspan="3"><b>京东同样适用第 2/3 步</b> —— <span style="color:#b3261e"><b>⚠️ 2026-10-02 实测纠正旧结论</b></span>：服务端 HTML 只有 47KB、零商品；商品数据在 <code>api.m.jd.com/api?appid=search-pc-java</code> 的明文 JSON 里 （含 wareId/wareName/jdPrice）。京东已改为「响应截获 + DOM 兜底」，并首次拿到商品级去重键。<b>详见第 12 节</b></td></tr>
+</tbody>
+</table>
+
+<h2><span class="n">07</span>证据与可信度说明</h2>
+
+<table>
+<thead><tr><th style="width:34%">结论</th><th style="width:22%">证据强度</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>各开源项目的技术路线、代码写法</td><td class="yes">已核对原始源码</td><td>从 <code>raw.githubusercontent.com</code> 抓取 40 个文件逐份阅读，非凭印象</td></tr>
+<tr><td>闲鱼搜索接口为 <code>mtop...pc.search</code>、签名 <code>md5(token&t&appkey&data)</code></td><td class="yes">已核对原始源码</td><td><code>xianyu/mtop.py</code> 第 36~171 行</td></tr>
+<tr><td>拼多多页面存在 <code>apiv3.yangkeduo.com</code> 的 JSON 接口</td><td>外部代码证据</td><td>来自 <code>SZFsir/pddSpider</code> 的代理拦截规则</td></tr>
+<tr><td>我们各源的实际耗时</td><td class="yes">本项目实测</td><td>取自今日 <code>data/collect.log</code> 的"采集结束"行</td></tr>
+<tr><td><b>「网络截获能用于本项目」这一条</b></td><td class="no">尚未在本项目验证</td><td><b>属推断</b>：依据是外部项目确实拦到了这些接口。需要第 06 节第 1 步的实测才能确认</td></tr>
+<tr><td>我们指纹相关参数的影响</td><td class="yes">本项目已实测</td><td><code>session.py</code> 中记录了七组对照的完整数据（卡片数/峰值内存/是否命中风控）</td></tr>
+<tr><td>代理池的收益不确定性</td><td class="no">未验证</td><td>"换 IP 能否解决搜索级软风控"我没有实验证据，结论仅基于风险权衡</td></tr>
+</tbody>
+</table>
+
+<h2><span class="n">08</span>优化项总表（共 23 项）</h2>
+
+<p>把调研到的所有可借鉴点编号列出。<b>值得做 14 项</b>、<b>有条件 2 项</b>、<b>明确不做 7 项</b>。</p>
+
+<h3>① 值得做（14 项）</h3>
+
+<table>
+<thead><tr><th style="width:5%">#</th><th style="width:24%">优化项</th><th style="width:26%">出处（已核对源码）</th><th>收益 / 备注</th></tr></thead>
+<tbody>
+<tr><td colspan="4" style="background:#f4f7fb;font-weight:620;color:#243447">取数通道（3 项）</td></tr>
+<tr><td>1</td><td><b>闲鱼改「响应截获」</b></td><td><code>superboyyy/xianyu_spider</code> · <code>xianyu/mtop.py</code></td><td>抓 <code>mtop.taobao.idlemtopsearch.pc.search</code> 返回的 JSON，对改版免疫</td></tr>
+<tr><td>2</td><td><b>拼多多改「响应截获」</b></td><td><code>SZFsir/pddSpider</code> · <code>Spider.py</code></td><td>抓 <code>apiv3.yangkeduo.com</code> 的 <code>v4/operation/*/groups</code></td></tr>
+<tr><td>3</td><td>DOM 解析保留为兜底</td><td>本项目（配套项）</td><td>截获失败时回退，避免单点故障</td></tr>
+<tr><td colspan="4" style="background:#f4f7fb;font-weight:620;color:#243447">性能（3 项）—— 针对我们「把窗口藏起来」的副作用</td></tr>
+<tr><td>4</td><td><code>--disable-background-timer-throttling</code></td><td><code>LittleCrawler</code> · <code>browser_launcher.py</code></td><td rowspan="3">我们<b>没有</b>这三个参数，但我们会用 <code>hide_browser_app()</code> 把应用隐藏（<code>session.py:708</code>）—— 应用一隐藏，Chrome 的计时器节流与渲染降级就会生效。<b>值得实测</b>（我们已知同类教训：Mac 上 <code>ProcessType=Background</code> 会造成约 5 倍降速）</td></tr>
+<tr><td>5</td><td><code>--disable-renderer-backgrounding</code></td><td><code>LittleCrawler</code> · <code>browser_launcher.py</code></td></tr>
+<tr><td>6</td><td><code>--disable-backgrounding-occluded-windows</code></td><td><code>LittleCrawler</code> · <code>browser_launcher.py</code></td></tr>
+<tr><td colspan="4" style="background:#f4f7fb;font-weight:620;color:#243447">稳定性（3 项）</td></tr>
+<tr><td>7</td><td>登录失效「降级继续」</td><td><code>superboyyy</code> · <code>invalidate_expired_login()</code></td><td>清登录 Cookie 但保留 <code>_m_h5_tk/_m_h5_tk_enc/cna</code>，未登录也能搜，结果标 <code>login_expired</code> —— 而不是整源失败</td></tr>
+<tr><td>8</td><td>刷新凭据后<b>只重试一次</b></td><td><code>superboyyy</code> · <code>mtop_request()</code></td><td>命中过期就刷新并重试<b>一次</b>，失败即返回。与我们"不撞墙"原则一致，但我们是隐式的，它给了显式上限</td></tr>
+<tr><td>9</td><td>京东提取 <code>result_count</code> 交叉校验</td><td><code>ShilongLee/Crawler</code> · <code>service/jd/logic/search.py</code></td><td>从页内 script 正则取结果总数：<b>总数 &gt; 0 但卡片 = 0</b> ⇒ 限流或被改版；总数 = 0 ⇒ 真无货。我们目前只能看到"0 条"</td></tr>
+<tr><td colspan="4" style="background:#f4f7fb;font-weight:620;color:#243447">数据质量（4 项）</td></tr>
+<tr><td>10</td><td><b>去重键改用商品链接归一</b></td><td><code>superboyyy</code> · <code>search.py::get_link_unique_key()</code></td><td>我们现在用 <code>(平台, 标题, 价格)</code>（<code>base.py:331</code>）—— 卖家改个标题就变成新条目。它取链接 <code>&amp;</code> 前段做 md5 作唯一键，稳定得多</td></tr>
+<tr><td>11</td><td>价格单位归一（"万"）</td><td><code>superboyyy</code> · <code>handle_data()</code></td><td><code>¥1.2万 → 12000</code>。闲鱼高价商品会显示"万"，我们现在的解析没有处理</td></tr>
+<tr><td>12</td><td>链接协议归一</td><td><code>superboyyy</code> · <code>handle_data()</code></td><td><code>fleamarket://…</code> → <code>https://www.goofish.com/…</code>，否则存进库的 URL 打不开</td></tr>
+<tr><td>13</td><td>采集发布时间 / 地区 / 卖家</td><td><code>superboyyy</code> · <code>handle_data()</code></td><td>这三个字段 DOM 上拿不到、接口里有。<b>发布时间</b>可用于识别"新上架"（对捡漏有直接价值）</td></tr>
+<tr><td colspan="4" style="background:#f4f7fb;font-weight:620;color:#243447">可观测性（1 项）</td></tr>
+<tr><td>14</td><td>轮次<b>分段计数</b></td><td><code>superboyyy</code> · <code>/im/status</code></td><td>它用 <code>ws_frames/sync_pushes/parsed</code> 三段计数区分"没推到"与"推到了没解开"。我们可拆成 <code>navigate 成功 → 就绪 → 命中接口 → 解析成功 → 入库</code></td></tr>
+</tbody>
+</table>
+
+<h3>② 有条件（2 项，取决于是否触发前提）</h3>
+<table>
+<thead><tr><th style="width:5%">#</th><th style="width:28%">项</th><th style="width:24%">出处</th><th>前提</th></tr></thead>
+<tbody>
+<tr><td>15</td><td>京东翻页公式 <code>page = n×2−1</code></td><td><code>ShilongLee</code> · <code>request_search()</code></td><td>仅在需要"每型号取更多报价"时。<b>京东搜索结果页只有奇数页有商品</b>，这是硬坑</td></tr>
+<tr><td>16</td><td>缓存抽象层（本地 / Redis + 工厂）</td><td><code>LittleCrawler</code> · <code>src/services/cache/</code></td><td>仅在引入 Redis 或多实例部署时。现在是单机单进程，直接读写更简单</td></tr>
+</tbody>
+</table>
+
+<h3>③ 明确不做（7 项）</h3>
+<table>
+<thead><tr><th style="width:5%">#</th><th style="width:26%">项</th><th style="width:26%">谁在做</th><th>不做的理由</th></tr></thead>
+<tbody>
+<tr><td>17</td><td>代理池 / IP 轮换</td><td><code>LittleCrawler</code>、<code>ShilongLee</code></td><td>我们<b>带登录态</b>，换 IP = 风控眼里的"同一账号多 IP 高频访问"（账号盗用特征）；目标是国内站，境外节点是异常信号</td></tr>
+<tr><td>18</td><td>多账号轮换</td><td><code>ShilongLee</code>（<code>/add_account</code>）</td><td>需要多个实名账号，合规成本远超收益</td></tr>
+<tr><td>19</td><td>自研 MTop 签名走纯 HTTP</td><td><code>superboyyy</code>（路线 A）</td><td>签名规则会变，改一次要重读源码。「截获页面自己的响应」数据完全相同，却不承担签名维护成本</td></tr>
+<tr><td>20</td><td>JS 逆向 + 补环境</td><td><code>Crack-JS-Spider</code>、<code>JDPackage</code>（PyV8）</td><td>产物带保质期：样本是 2022 年的 3717 行反混淆 JS，且<b>补环境代码已被作者注释掉</b>，当前不可直接运行</td></tr>
+<tr><td>21</td><td>滑块轨迹脚本化</td><td><code>LittleCrawler</code>（<code>easing.py</code>）、<code>wkunzhi</code></td><td>滑块是平台明确的安全控制，脚本化轨迹本身就是被检测的行为特征</td></tr>
+<tr><td>22</td><td>隐藏自动化补丁</td><td><code>LittleCrawler</code>（<code>stealth.min.js</code>）、<code>SZFsir</code>（改写 JS）</td><td>这些针对 Selenium / <code>Playwright.launch()</code> 注入的特征；我们<b>本来就没有</b>，加了等于主动断言"我在做自动化"</td></tr>
+<tr><td>23</td><td>第三方打码平台</td><td><code>SZFsir</code>（超级鹰）</td><td>把风控难题外包给第三方，账号风险不降反升</td></tr>
+</tbody>
+</table>
+
+<h3>④ 已实测否决（不是「不建议」，是真的试过 —— 别再重复讨论）</h3>
+
+<div class="rec p2">
+  <h4><span class="tag t-no">实测否决</span>京东联盟开放平台 API —— 链路已通，但<b>覆盖率实测 0</b></h4>
+  <div class="body">
+    <div class="kv">「用官方接口代替爬虫」是对这类问题最常见的建议，所以它被<b>认真做过一轮</b>：
+      个人入驻完成、按官方文档修正参数后<b>链路确实打通了</b>（外层 <code>code=0</code>）。</div>
+    <div class="evidence">
+      <b>覆盖率实测（2026-10-01 20:11，提交 <code>e052be4</code>）</b><br>
+      用已开通的 <code>goods.jingfen.query</code> 扫 <b>30 个频道 1211 条商品</b>：<br>
+      <b>显卡 0 条、CPU 0 条</b> —— 显卡/CPU 是低佣金品类，商家基本不参加联盟推广。<br><br>
+      能关键词搜索的 <code>goods.query</code> 不在基础权限内（<code>403</code>），
+      申请入口要求<b>企业名称 + 流量证明（至少 1 张图）</b>，个人填不了。
+    </div>
+    <div class="kv"><b>结论：</b>对「追踪 130 个显卡/CPU 型号价格」不可用，回到爬虫方案。
+      探针保留在 <code>scripts/jd_union_probe.py</code>（参数 / 签名 / 错误码已全部正确，含踩坑清单），
+      <b>日后有实体资质可直接用</b>。</div>
+  </div>
+</div>
+
+<div class="rec p2">
+  <h4><span class="tag t-no">推断</span>拼多多多多进宝（<code>pdd.ddk.goods.search</code>）</h4>
+  <div class="body">
+    <div class="kv">同属<b>推广库</b>（多多进宝 = 联盟 / CPS），同样只覆盖参加推广的商品；
+      且返回<b>券后价 / 推广价</b>，与现有口径不可比。</div>
+    <div class="kv">⚠️ <b>未单独实测</b> —— 这一条是<b>沿用京东的结论做的推断</b>，不是拼多多自己的数据。
+      理由是京东已经证明"这条路对低佣金品类无效"，没有必要重走。</div>
+  </div>
+</div>
+
+<h2><span class="n">09</span>核对中发现的真实缺陷（建议优先修）</h2>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">缺陷</span>限流检测器把错误码当裸字符串搜正文 → 误熔断</h4>
+  <div class="body">
+    <div class="kv"><b>现象：</b>拼多多被判定限流并中止整批，但页面其实是<b>正常搜索结果页</b>。</div>
+
+    <div class="evidence">
+      <b>证据 1 —— 命中位置（取自 <code>data/collect.log</code>）</b><br>
+      <code>23:31:33 拼多多 触发限流熔断：pdd 命中限流特征「40001」：想P3图形工作站台式机升级i9-14900K/128G/1TSSD /RTXA400016G 仅剩5件 24小时内发货 假一赔十 ¥ 35000 56人想拼 …</code>
+    </div>
+
+    <div class="evidence">
+      <b>证据 2 —— 把 <code>40001</code> 定位回原文</b><br>
+      判定命中的特征 <code>'40001'</code> 在被扫描正文的<b>第 40 个字符</b>处命中，上下文为：<br>
+      <code>…i9-14900K/128G/1TSSD /RTXA400016G 仅剩5件…</code><br>
+      即显卡型号 <b>RTX A4000 16G</b> —— 「A4000」+「16G」拼出了 <code>40001</code>。
+    </div>
+
+    <div class="evidence">
+      <b>证据 3 —— 与真限流的形态对比（决定性）</b><br>
+      今天拼多多共触发熔断数十次，<b>真限流全部命中短语</b> <code>系统繁忙</code>，上下文格式统一为
+      <code>「&lt;型号&gt; 商品  系统繁忙  请稍后再试」</code>（平台内嵌的错误块）；<br>
+      而仅有的 <b>2 次</b>（18:33:34、23:31:33）命中的是<b>裸数字</b> <code>40001</code>，
+      上下文是<b>带价格与"56人想拼"的真实商品卡片</b>。两者形态完全不同。
+    </div>
+
+    <div class="kv"><b>根因：</b><code>PLATFORM_THROTTLE_CONFIG["pdd"].rate_limit_indicators</code> 里同时存在
+      <code>'error_code=40001'</code>（精确、安全）与 <code>'40001'</code>（裸数字）；
+      而 <code>detect_rate_limit()</code> 对 <code>title + 正文</code> 做的是<b>朴素子串匹配</b> ——
+      正文里全是商品型号，数字串碰撞不可避免。</div>
+
+    <div class="kv"><b>影响：</b>① 每次误判中止整批（6 个型号 → 0 条）；② 推进软风控阶梯（15分 → 2小时 → 4小时），
+      可能把本来正常的平台<b>逐级锁死</b>；③ 表现与"平台一直限流"无法区分，会误导后续所有判断。</div>
+
+    <div class="kv"><b>建议修法（三步，都很小）：</b></div>
+    <ul class="tight">
+      <li>删掉裸数字 <code>'40001'</code> —— 它是冗余的，<code>'error_code=40001'</code> 已同时存在于
+        <code>rate_limit_indicators</code> 与 <code>rate_limit_url_patterns</code></li>
+      <li>加自检断言：<b>任何平台都不允许出现"纯数字"的限流特征</b>（钉住这一类，而不只是这一个）</li>
+      <li>加真阴性用例：正文含 <code>RTXA400016G</code> 的<b>正常商品页</b>不得被判限流
+        —— 现有 3 个"真阴性"用例没覆盖到这种串</li>
+    </ul>
+
+    <div class="kv"><b>与既有教训的关系：</b>这正是项目里第 1 条教训（"源码级断言只查子串一定不可靠"）的
+      <b>生产版本</b> —— 同一个失效模式，此前只出现在测试里，这次跑进了判定逻辑。</div>
+  </div>
+</div>
+
+<h2><span class="n">10</span>缺陷二：万元价被拆成多行渲染（数据污染级）</h2>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">已修</span>价格被拆成多行 → <code>2.30万</code> 记成 <code>¥2.00</code></h4>
+  <div class="body">
+    <div class="kv"><b>发现路径：</b>核对缺陷一的过程中，注意到<b>闲鱼库里价格上限恰好卡在 10000</b>
+      （无一条超过），而同期京东有 66 条在 1 万~2 万。这个整数边界反常，顺着查下去就找到了根因。</div>
+
+    <div class="evidence">
+      <b>证据 1 —— 库里的异常分布</b><br>
+      <table style="margin:8px 0">
+        <tr><th>平台</th><th>1万~2万</th><th>&gt; 2万</th><th>观察</th></tr>
+        <tr><td>闲鱼</td><td><b>0</b></td><td><b>0</b></td><td>上限恰好 = 10000</td></tr>
+        <tr><td>京东</td><td>66</td><td>13</td><td>正常</td></tr>
+        <tr><td>拼多多</td><td>46</td><td>29</td><td>正常</td></tr>
+      </table>
+      <code>RTX 4090 24G</code> 在闲鱼的 max 只有 <b>9998</b>，而它的二手实际行情是 1.3~1.6 万。
+    </div>
+
+    <div class="evidence">
+      <b>证据 2 —— 线上探针抓到的卡片原文</b>（闲鱼搜索「RTX 4090 24G」，<code>innerText</code>）<br>
+      <code>华硕RTX4090+24G猛禽满血版… ⏎ 37分钟前发布 ⏎ ¥ ⏎ 2 ⏎ .30 ⏎ 万 ⏎ 1人想要 ⏎ 山西</code><br><br>
+      价格 <b>2.30万（¥23,000）被拆成三行</b>。旧提取器只取「¥ 的下一行」= <code>'2'</code>，
+      而它<b>通过了</b> <code>/^\d+(\.\d+)?$/</code> 校验 → <b>记成 ¥2.00</b>。
+      同一页 30 条里有 <b>4 条</b>中招。<br>
+      （小数同样被拆：<code>¥ ⏎ 18 ⏎ .88</code> → 记成 18 而非 18.88。）
+    </div>
+
+    <div class="kv"><b>为什么最终表现为"完全丢失"：</b>¥2.00 这种假低价随后被
+      <b>数据质量闸门</b>判为离群值剔除 —— 所以库里看不到脏数据，只看到"某段价格凭空消失"。
+      <b>脏数据能被发现，静默丢弃不能</b>，这类 bug 因此格外隐蔽。</div>
+
+    <div class="kv"><b>改法：</b>新增 <code>app/collectors/normalize.py</code>。JS 退化为「原样取连续价格片段」
+      （<code>priceSeg</code>），<b>拼装与判读全部交给 Python</b> ——
+      因为 JS 里写不了单测。片段形状校验也在 Python：
+      首段必须是数字，后续段只能是 <code>.xx</code> 或 <code>万</code>，
+      遇到别的就停（否则「¥ 2688」后面跟一行「56人想拼」会被拼成 268856）。</div>
+
+    <div class="evidence">
+      <b>验证 —— 改后用真实页面复跑</b><br>
+      <code>RTX 4090：30 行 → 16 条 ≥1万（改前 0 条），最高 ¥29,900，中位 ¥18,500</code><br>
+      拆行价格 16 条，例：<code>['2','.30','万'] → ¥23,000.00</code>
+    </div>
+
+    <div class="kv"><b>⚠️ 数据影响：</b>自 2026-09-16 起的<b>闲鱼历史数据里，所有 ≥1 万的报价都缺失</b>。
+      受影响的是旗舰显卡（4090 / 5090 / 5080）—— 它们的闲鱼均价被系统性低估，
+      性价比指数可能因此偏差。是否重采补齐需要单独决定。</div>
+
+    <div class="kv"><b>同批完成的相关项：</b>优化项 #11（价格单位归一）、#12（链接协议归一）。
+      链接归一化已就位（<code>fleamarket:// → https://www.goofish.com/</code>、
+      去跟踪参数、<code>link_key</code> 去重键），但<b>尚未接线</b> ——
+      需要先让提取器抓到商品链接（现在三个源存的都是搜索页 URL）。</div>
+  </div>
+</div>
+
+<h2><span class="n">11</span>优化落地进度（截至 2026-10-02 01:25）</h2>
+
+<p>按 ROI 逐项推进。<b>已落地 6 项、实测否决 3 项、关闭 1 项。</b>（后续进度持续追加在本节）</p>
+
+<h3>✅ 已落地</h3>
+<table>
+<thead><tr><th style="width:5%">#</th><th style="width:26%">项</th><th style="width:30%">实测证据</th><th>提交</th></tr></thead>
+<tbody>
+<tr>
+  <td>11</td><td>价格单位归一（含拆行拼装）</td>
+  <td>RTX 4090：30 行 → <b>16 条 ≥1万</b>（改前 0 条），最高 ¥29,900、中位 ¥18,500</td>
+  <td><code>7f8fccb</code></td>
+</tr>
+<tr>
+  <td>12</td><td>链接协议归一（<code>fleamarket://</code> → https，去跟踪参数）</td>
+  <td>链接形如 <code>https://www.goofish.com/item?id=1081163330292</code></td>
+  <td><code>7f8fccb</code> / <code>1935921</code></td>
+</tr>
+<tr>
+  <td><b>1</b></td><td><b>闲鱼取数改为响应截获</b></td>
+  <td>端到端：<code>命中搜索接口：30 条（含发布时间/地区/商品链接）</code>；
+      实捕 300 KB 明文 JSON；<code>appKey=34839810</code> 与参考项目源码一致</td>
+  <td><code>1935921</code></td>
+</tr>
+</tbody>
+</table>
+
+<h3>❌ 实测否决（有实验数据，别再重开）</h3>
+
+<div class="rec p2">
+  <h4><span class="tag t-no">否决</span>#4-6 三个防节流启动参数</h4>
+  <div class="body">
+    <div class="kv">看着很对症 —— 我们确实把窗口挪到屏幕外并用 <code>hide_browser_app()</code>
+      隐藏了 App，理论上会触发 Chromium 后台节流。**但实测不成立**。
+      新增 <code>scripts/throttle_eval.py</code>（零平台请求）：</div>
+    <table style="margin:10px 0">
+      <tr><th>变体</th><th>定时器触发</th><th>rAF 帧</th><th>页面耗时 / 墙钟</th></tr>
+      <tr><td>现状（不加）</td><td>190</td><td>242</td><td>8020 / 8019 ms</td></tr>
+      <tr><td>只加 timer-throttling</td><td>190</td><td>242</td><td>8019 / 8018 ms</td></tr>
+      <tr><td>三个都加</td><td>190</td><td>241</td><td>8010 / 8012 ms</td></tr>
+      <tr><td>现状复测（防顺序偏差）</td><td>191</td><td>241</td><td>8024 / 8031 ms</td></tr>
+    </table>
+    <div class="kv">20ms 定时器链跑 4 秒应触发约 200 次 —— 四组都 190 次，<b>没有节流</b>；
+      且 <code>visibilityState=visible</code>、<code>hasFocus=true</code>
+      （离屏窗口在 Chrome 眼里仍是可见的）。</div>
+    <div class="evidence"><b>耗时算术佐证：</b>闲鱼单型号 26s ≈
+      固定开销(navigate 9s + 滚动 2.5s + settle 2s) + 策略间隔(gauss(9,3)≈9s)
+      + 长停顿折算 2.6s ≈ 25s —— 与实测吻合，<b>没有无法解释的延迟</b>。</div>
+  </div>
+</div>
+
+<h3>🚫 关闭：拼多多的响应截获</h3>
+<div class="rec p2">
+  <h4><span class="tag t-no">关闭</span>#2 拼多多改响应截获</h4>
+  <div class="body">
+    <div class="kv">探针实捕显示，拼多多的搜索响应是<b>加密态</b>：</div>
+    <div class="evidence">
+      <code>https://mobile.yangkeduo.com/proxy/api/search</code> → HTTP 200，98,960 字符<br>
+      响应体：<code>{"rc-res-data": "TWt0ycaMKBFUOjxvTjAMDR-8K75qc7PddS3ev_9OXMBNKMLYdKl-9UfvfJSxVU5xfFPeABvBSMHpYzIvx5usO45fQ570Te6ooB8YeGMYe32lI94Z9UyCqnNxJJMaaghW-vaoe8x_2X2W68ArtTfeC3VwpKLirFZZsdBiU2GY9-mYjGvrFvaofUov4IIjm3-7s-eHn4KuSHfH49mycFg-8…"}</code>
+    </div>
+    <div class="kv">截获后还要解密 —— 与"避免逆向"的初衷背离。<b>这条路对 PDD 不成立</b>，
+      继续用 DOM 解析。（顺带排除：<code>/proxy/api/xg/pfb/a3</code>、<code>a4</code>
+      也是加密字段，<code>search_hotquery</code> 是明文但不是商品数据。）</div>
+  </div>
+</div>
+
+<h3>✅ 已落地（第二批）</h3>
+<table>
+<thead><tr><th style="width:5%">#</th><th style="width:22%">项</th><th style="width:40%">实测证据</th><th>提交</th></tr></thead>
+<tbody>
+<tr>
+  <td>10</td><td>去重身份改用商品链接</td>
+  <td>新键 <code>quote_identity()</code>：优先商品链接，<b>拿不到链接必须回落</b>到
+      <code>(平台,标题,价格)</code>。实测三个平台的搜索 URL 在 <code>link_key()</code>
+      下都返回空串（走回落、行为与改前一致）—— <b>不做回落会把整个型号 30 条报价并成 1 条</b>。
+      同时把 <code>base.dedupe_quotes</code> 与 <code>task_queue.load_quotes</code>
+      的两套键收敛成一份实现</td>
+  <td><code>1163c6f</code></td>
+</tr>
+<tr>
+  <td>14</td><td>轮次分段计数</td>
+  <td>真实轮次：<code>闲鱼 分段计数：接口命中 1 · 有结果型号 1</code>。
+      配合管道的未匹配/过滤，完整漏斗可见：
+      <b>采集 30 → 未匹配 4 → 过滤 7 → 入库 19</b></td>
+  <td><code>1a13333</code></td>
+</tr>
+</tbody>
+</table>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">新发现</span>自检全绿但真实采集报错 —— 文本断言的盲区</h4>
+  <div class="body">
+    <div class="kv">做 #14 时，源文件里写了 <code>note_stage("接口命中")</code>，
+      但<b>忘了导入 <code>note_stage</code></b>。真实采集立刻
+      <code>NameError: name 'note_stage' is not defined</code>，
+      而<b>自检 551/551 全绿</b> —— 因为那些断言全是文本匹配。</div>
+    <div class="kv"><b>根因：</b>文本断言只能证明「字符串在文件里」，证明不了「代码能跑」。</div>
+    <div class="kv"><b>修法：</b>补一条<b>可执行</b>断言 —— 真的把符号 import 进来并检查
+      <code>callable()</code>。反向验证确认：它是这条链路上唯一能拦住
+      「删掉 import」的守卫。</div>
+    <div class="kv"><b>与前面几条「区分度」问题同源</b>：断言测的是"文字"而不是"行为"。
+      凡是可以真的执行一次的，就不要只用文本断言。</div>
+  </div>
+</div>
+
+<h3>⏳ 未做（按 ROI 排）</h3>
+<table>
+<thead><tr><th style="width:5%">#</th><th style="width:30%">项</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>10</td><td>去重键改用商品链接</td><td><b>零件已就绪</b>：<code>link_key</code> 可用、商品链接已进 <code>Quote.url</code>。下一步把 <code>dedupe_quotes</code> 接上即可（当前键是 <code>(平台,标题,价格)</code>，卖家改标题就成新条目）</td></tr>
+<tr><td>14</td><td>轮次分段计数</td><td><code>navigate 成功 → 就绪 → 命中接口 → 解析成功 → 入库</code></td></tr>
+<tr><td>9</td><td>京东 <code>result_count</code> 交叉校验</td><td>区分"真无货"与"被限流/改版"</td></tr>
+<tr><td>13</td><td>发布时间 / 地区入统计</td><td>字段已在采（<code>extra.publish_time / area</code>），尚未用于筛选</td></tr>
+<tr><td>7 / 8</td><td>登录失效降级继续、刷新后只重试一次</td><td>稳定性两项</td></tr>
+<tr><td>15 / 16</td><td>京东翻页、缓存抽象层</td><td>有条件项（暂不触发）</td></tr>
+</tbody>
+</table>
+
+<h2><span class="n">12</span>风控现状 &amp; 退避阶梯的两处「写了但不起作用」</h2>
+
+<p>用户问「还会风控吗」。查证过程比答案本身更有价值 —— 顺着查出来：<b>跨轮次退避阶梯
+一直存在，但两个前提不成立，于是它在真实调度上几乎是摆设</b>。</p>
+
+<h3>一、风控现状（实测）</h3>
+
+<table>
+<thead><tr><th style="width:14%">平台</th><th style="width:26%">历史触发</th><th>形态</th></tr></thead>
+<tbody>
+<tr><td>京东</td><td><code>访问频繁</code> ×16、<code>无法搜索</code> ×1</td>
+    <td><b>长期标记</b> —— 配额已压到每轮 2 个型号，仍然被拦</td></tr>
+<tr><td>拼多多</td><td><code>系统繁忙</code> ×22、<code>login.html</code> ×8、<code>40001</code> ×2</td>
+    <td>最顽固。登录态已恢复，<b>搜索级风控仍未解除</b></td></tr>
+<tr><td>闲鱼</td><td><code>非法访问</code> ×1（全期仅 1 次）</td>
+    <td>健康。10-01 晚间 15 型号 → 440 条稳定成功</td></tr>
+</tbody>
+</table>
+
+<div class="evidence">
+  <b>10-01 可确定日期的区间（15 轮）</b><br>
+  <code>19:30 jd=success(6) | xianyu=success(119)</code><br>
+  <code>20:30 jd=success(1) | pdd=failed(0) | xianyu=success(6)</code><br>
+  <code>21:30 jd=success(16) | xianyu=success(181)</code><br>
+  <code>23:30 jd=success(15) | pdd=failed(0) | xianyu=success(181)</code><br>
+  白天有多轮「限流中止」（京东 16:00 / 17:00 / 21:00；闲鱼 22:01）。
+  <b>京东是「下午被拦、晚上正常」的间歇形态</b> —— 这正是下面 ② 的成因。
+</div>
+
+<div class="kv"><b>结论：防限流策略不能消除风控。</b>它是概率问题。能证明的只有两件事：
+  ① 熔断<b>正确识别并止损</b>（首次命中即中止：JD 7 秒 / PDD 26.7 秒，改造前要连撞 2~3 个型号）；
+  ② 现在退避<b>真的会生效</b>（本轮修复）。<b>不能</b>证明「这套策略能防住限流」——
+  那需要干净环境跑几天观察。</div>
+
+<h3>二、两处「写了但不起作用」（已修 <code>73be3e4</code>）</h3>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">已修</span>① 第 1 级短于轮次间隔 = 空转</h4>
+  <div class="body">
+    <div class="kv">冷却是在<b>下一轮开始时</b>被 <code>fast_fail()</code> 评估的。
+      所以任何短于<b>轮次间隔（1 小时）</b>的冷却在调度上<b>等于不存在</b> ——
+      到点一看早就过期了，照样全速去撞。第 1 级（硬 30 分钟 / 软 15 分钟）正是这种情况：
+      <b>文档里写着「退避」，实际一轮都没跳过。</b></div>
+    <div class="evidence">
+      <b>项目自己已经两次实测到这一点</b><br>
+      · 2026-09-24 「15 分钟 &lt; 轮次间隔，所以不跳过任何一轮」<br>
+      · 2026-10-01 京东下午被拦 → 30 分钟冷却在下一轮早已过期 → 每小时继续撞
+    </div>
+    <div class="kv"><b>修法：</b>新增 <code>breaker.min_cooldown()</code>，冷却取
+      <code>max(阶梯级, 一轮 + 5 分钟缓冲)</code>（默认 3900s = 65 分钟）。
+      只作用于<b>阶梯路径</b> —— <code>trip(seconds=...)</code> 显式传值（单测/排障）
+      不套下限，否则秒级演练会被抬到 65 分钟。
+      <code>DIYPRICE_BREAKER_MIN_COOLDOWN</code> 可覆盖，设 0 回到阶梯原值。</div>
+  </div>
+</div>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">已修</span>② record_success 清零 → 间歇性拦截永远升不上去</h4>
+  <div class="body">
+    <div class="kv">原来一次成功就把余量清零。对「连续被拦」有效，但
+      <b>对间歇性拦截完全无效</b>：平台一小时被拦、下一小时侥幸采到几条 →
+      台阶被重置回第 1 级 → <b>永远升不到第 2 级</b>。
+      净效果是每小时都全速撞同一堵墙，而阶梯一次没生效。</div>
+    <div class="evidence">
+      京东 10-01 正是这个形态（下午被拦、晚上 19:31 / 20:30 / 21:31 / 23:31 正常），
+      当时 <code>consecutive_trips("jd") == 0</code> 就是被清零的直接证据。
+    </div>
+    <div class="kv"><b>修法：</b>改为<b>递减</b> —— 成功一轮减一级，减到 0 才整条清掉。
+      探针 <code>verified=True</code> 仍一次清掉（那是「渠道此刻可用」的直接证据，
+      不是侥幸）。</div>
+    <div class="kv"><b>⚠️ 副作用：</b>第 1 级软(15min)/硬(30min) 都被下限统一到 65 分钟，
+      <b>软硬在第 1、2 级不再可区分</b>。真正的区分从<b>第 3 级</b>开始
+      （软 4 小时 vs 硬 6 小时）。自检里原来「用第 1 级区分软硬」的断言已挪到第 3 级 ——
+      否则那两条断言会变成<b>永远通过</b>。</div>
+  </div>
+</div>
+
+<h3>三、两个顺带发现</h3>
+
+<div class="rec p2">
+  <h4><span class="tag t-no">未做</span>日志行没有日期前缀 → 跨天统计不可靠</h4>
+  <div class="body">
+    <div class="evidence">
+      <code>01:26:52 host diyprice.collector | …</code>（<b>无日期</b>）<br>
+      只有轮次边界带日期：<code>[2026-10-01 23:30:05] ──── 采集轮次开始 ────</code>
+    </div>
+    <div class="kv">所以「按天统计限流次数/耗时」只能靠位置推断，<b>很容易算错</b>
+      （本次第一版就把京东 10-01 算成 0 次）。补日期前缀是个小改动，但会显著提升可观测性。
+      <b>本轮没动</b>（避免与 10-01 的多次格式改动叠加）。
+      替代办法：只分析<b>最后一个日期标记之后</b>的区间，或直接查数据库。</div>
+  </div>
+</div>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">自查</span>我写了一条「永远绿」的断言</h4>
+  <div class="body">
+    <div class="evidence"><code>... and 7100 &lt; remaining &lt;= 7200 or True</code></div>
+    <div class="kv"><code>or True</code> 让它<b>必然通过</b> —— 与项目第 1 条教训同源
+      （测试本身失效，比没有测试更危险）。已换成真跑一次第 2 级，
+      确认下限不会把更长的级压短。</div>
+  </div>
+</div>
+
+<h3>四、验证</h3>
+
+<table>
+<thead><tr><th style="width:34%">项</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>自检</td><td><b>575/575</b>（551 → 575）</td></tr>
+<tr><td>完整反向守卫</td><td>结论「全部守卫有效」（末尾 4 条因沙箱删除预算未能判定）</td></tr>
+<tr><td>定向反向验证</td><td><b>4/4 拦住</b>，基线为绿、还原为绿</td></tr>
+<tr><td>情景对照</td><td>单次硬拦截 <code>1800s → 3900s</code>（真的能跳过下一轮）；
+    余量 4 时成功一轮只减到 3（不再清零）</td></tr>
+<tr><td>最小冒烟（闲鱼 1 型号）</td><td>30 条、无异常、环境归零</td></tr>
+</tbody>
+</table>
+
+<hr class="sep">
+
+<hr class="sep">
+
+<div class="card">
+  <h3 style="margin-top:0">一句话总结</h3>
+  <p style="margin-bottom:0">
+    调研的 10 个项目里，<b>最值得抄的不是它们的反爬手段，而是它们的取数通道</b> —— 数据在平台返回的 JSON 里，
+    而我们一直在解析渲染后的文本；同时<b>它们普遍在工程化上远不如我们</b>（无指纹实测、无熔断持久化、无磁盘治理、无数据口径闸门），
+    所以正确姿势是<b>只取"网络层取数"这一条，其余保持我们自己的做法</b>。
+  </p>
+</div>
+
+<div class="foot">
+  调研对象：GitHub 公开仓库 10 个（原始源码逐份核对）<br>
+  对比基线：<code>/Users/apple/WorkBuddy/DIY价格汇报</code> @ 2026-10-01<br>
+  报告生成：2026-10-01 23:40<br>证据清单：<code>reports/竞品调研-证据清单.json</code> —— 42 份原始源码的仓库/路径/SHA256，报告中每条代码引用均可按此复核（只记来源与校验值，不复制第三方源码）
+</div>
+
+</div>
+</body>
+</html>

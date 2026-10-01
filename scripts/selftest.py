@@ -222,36 +222,55 @@ class _StubRandom:
 
 
 def test_policy_delays() -> None:
+    """节奏的边界与分布。
+
+    ⚠️ 断言**从策略常量推导**，不硬编码秒数 —— 2026-10-02 调整京东节奏时，
+    硬编码的 `3.0/8.0/22.5` 让 4 条断言同时误报，看起来像"改坏了"，
+    实际只是测试在复述旧参数。参数该被断言的是**性质**（夹取、抖动、量级），
+    不是具体数字。
+    """
     from app.collectors import policy
+
+    jd = policy.policy_for("jd")
 
     # 高斯采样低于下界 → 必须被抬到 delay_floor，而不是"来一次快速连发"
     with mock.patch.object(policy, "random", _StubRandom(-999.0, 0.99)):
         low = [policy.next_delay("jd") for _ in range(5)]
-    check("低于下界被抬到 delay_floor（京东 3.0s）",
-          all(abs(v - 3.0) < 1e-6 for v in low), f"实际 {low}")
+    check(f"低于下界被抬到 delay_floor（京东 {jd.delay_floor:.1f}s）",
+          all(abs(v - jd.delay_floor) < 1e-6 for v in low), f"实际 {low}")
 
     # 高斯采样高于上界 → 必须被压到 delay_ceil
     with mock.patch.object(policy, "random", _StubRandom(999.0, 0.99)):
         high = [policy.next_delay("jd") for _ in range(5)]
-    check("高于上界被压到 delay_ceil（京东 8.0s）",
-          all(abs(v - 8.0) < 1e-6 for v in high), f"实际 {high}")
+    check(f"高于上界被压到 delay_ceil（京东 {jd.delay_ceil:.1f}s）",
+          all(abs(v - jd.delay_ceil) < 1e-6 for v in high), f"实际 {high}")
 
     # 命中长停顿分支：正常值 + 长停顿区间中值
-    with mock.patch.object(policy, "random", _StubRandom(5.0, 0.0)):
+    mid = sum(jd.long_pause_range) / 2.0
+    with mock.patch.object(policy, "random", _StubRandom(jd.delay_mu, 0.0)):
         long_delay = policy.next_delay("jd")
-    check("偶发长停顿会叠加（5.0 + (10+25)/2 = 22.5s）",
-          abs(long_delay - 22.5) < 1e-6, f"实际 {long_delay}")
+    expect = jd.delay_mu + mid
+    check(f"偶发长停顿会叠加（{jd.delay_mu:.1f} + {mid:.1f} = {expect:.1f}s）",
+          abs(long_delay - expect) < 1e-6, f"实际 {long_delay}")
 
     # 真实随机下界：绝不允许出现"过快的连发"
-    for code, floor in (("jd", 3.0), ("xianyu", 5.0), ("pdd", 6.0)):
-        samples = [policy.next_delay(code) for _ in range(2000)]
+    for code in ("jd", "xianyu", "pdd"):
         pol = policy.policy_for(code)
+        samples = [policy.next_delay(code) for _ in range(2000)]
         cap = pol.delay_ceil + pol.long_pause_range[1]
-        check(f"{pol.label} 2000 次采样都在 [{floor}, {cap}] 内",
-              min(samples) >= floor - 1e-9 and max(samples) <= cap + 1e-9,
+        check(f"{pol.label} 2000 次采样都在 [{pol.delay_floor:.1f}, {cap:.1f}] 内",
+              min(samples) >= pol.delay_floor - 1e-9 and max(samples) <= cap + 1e-9,
               f"实际 [{min(samples):.2f}, {max(samples):.2f}]")
         check(f"{pol.label} 间隔确实在波动（不是固定值）",
               len({round(v, 2) for v in samples}) > 100)
+
+    # ---- 节奏量级守卫：把"调得太快"钉住 ----
+    # 依据：三个 2026 年在维护的同类实现，页内节奏都是 8~15s
+    # （`jdcrawler/middlewares.py:73-75`），而京东是我们被标记最重的平台。
+    check("京东间隔下界不短于 5s（节奏过快的直接代价是被风控标记）",
+          jd.delay_floor >= 5.0, f"实际 {jd.delay_floor}s")
+    check("京东长停顿概率不低于 15%（真人的浏览时长本来就不均匀）",
+          jd.long_pause_prob >= 0.15, f"实际 {jd.long_pause_prob:.0%}")
 
     # 多标签并发是明确禁止的（并发请求会让"间隔随机化"失效）
     check("三个平台都禁止多 Tab 并发",
@@ -279,11 +298,14 @@ def test_policy_delays() -> None:
           policy.policy_for("unknown").code == "_default"
           and policy.policy_for(None).code == "_default")
 
-    # 京东的核心分布应与需求一致：多数落在 3~8s
-    jd = [policy.next_delay("jd") for _ in range(2000)]
-    core_ratio = sum(1 for v in jd if v <= 8.0) / len(jd)
-    check("京东多数间隔落在 3~8s 核心区间（长停顿是少数）",
-          core_ratio > 0.8, f"实际 {core_ratio:.0%}")
+    # 分布性质（从常量推导）：多数落在常规区间，长停顿是少数
+    for code in ("jd", "xianyu", "pdd"):
+        pol = policy.policy_for(code)
+        samples = [policy.next_delay(code) for _ in range(3000)]
+        within = sum(1 for v in samples if v <= pol.delay_ceil + 1e-9) / len(samples)
+        check(f"{pol.label} 多数间隔落在常规区间（长停顿是少数）",
+              within >= 1.0 - pol.long_pause_prob - 0.05,
+              f"实际 {within:.0%}（长停顿概率 {pol.long_pause_prob:.0%}）")
 
 
 # ============================================================== 限流识别
@@ -2898,8 +2920,12 @@ def test_xianyu_api_parse() -> None:
         check("闲鱼接口：标题正确", r["title"].startswith("华硕TUF RTX4090"), r["title"][:30])
         check("闲鱼接口：fleamarket:// 归一到 https",
               r["item_url"].startswith("https://www.goofish.com/"), r["item_url"][:60])
-        check("闲鱼接口：拿到发布时间（DOM 上取不到）",
-              r["publish_time"] == "1790871637000", r["publish_time"])
+        # ⚠️ 2026-10-02 改：`publish_time` 现在经 `normalize.parse_publish_time`
+        #    归一成 ISO。接口给的是**毫秒时间戳**、DOM 给的是「37分钟前」相对文案，
+        #    两种形态混着入库会让下游各自猜单位（本项目被咬过多次的那类问题）。
+        #    这里断言归一后的确定值 —— 既钉住"归一发生了"，也钉住"换算没错"。
+        check("闲鱼接口：毫秒时间戳被归一成 ISO（DOM 上取不到）",
+              r["publish_time"] == "2026-10-02 00:20:37", r["publish_time"])
         check("闲鱼接口：拿到地区（DOM 上取不到）", r["area"] == "广东", r["area"])
         check("链接归一：商品页只保留 id（非跟踪参数也要去掉）",
           N.normalize_url("https://www.goofish.com/item?id=999&foo=bar") ==
@@ -3347,6 +3373,383 @@ def test_jd_payload_and_policy_case() -> None:
           and callable(getattr(_jd, "note_stage", None)))
 
 
+def test_cli_collect_guard() -> None:
+    """CLI 的「采集进行中」守卫 —— 防止共享浏览器被 CLI 顺手杀掉。
+
+    事故（2026-10-02 07:38）：`login-check` 结束时 `worker.stop()`，
+    而浏览器是进程间共享的（同 CDP 端口 + 同 profile），
+    于是把正在跑的那一轮也杀了（闲鱼第 9/15 个型号报页面已关闭）。
+    """
+    import inspect
+
+    from app.services import pipeline
+
+    check("pipeline 提供 collect_round_running()（判活，不是判目录存在）",
+          callable(getattr(pipeline, "collect_round_running", None)))
+    src = inspect.getsource(pipeline.collect_round_running)
+    check("判活用 os.kill(pid, 0)，不发实际信号",
+          "os.kill(pid, 0)" in src, src[-200:])
+    check("不用「锁目录存在」当判据（异常退出会留陈旧目录）",
+          "is_dir()" in src and "return False, 0" in src)
+
+    import pathlib as _pl
+
+    cli_src = _pl.Path("app/cli.py").read_text(encoding="utf-8")
+    check("login-check 在碰 worker 之前先检查采集是否在跑",
+          "collect_round_running()" in cli_src.split("def cmd_login_check")[1]
+          and cli_src.split("def cmd_login_check")[1].index("collect_round_running()")
+          < cli_src.split("def cmd_login_check")[1].index("get_worker()"))
+    check("browser --kill/--recycle 也被守卫拦住",
+          "args.kill or args.recycle" in cli_src)
+
+
+def test_failure_triage() -> None:
+    """三类失败必须**分开判定** —— 混在一起会让"登录失效"被记成"被风控"。
+
+    这是本轮最重要的一条改动。混在一起的代价是真实的：
+      · 登录失效被记成风控 → 冷几小时，而问题只是没人去扫码
+        （PDD 2026-10 之前"跳 login.html → 熔断 1 天 → 到期重试 → 还是 login.html"
+         的无限循环）
+      · 真无货被当成限流证据 → 无货型号成了"推断被拦"的燃料，
+        退避阶梯被自己越推越高
+    """
+    from app.collectors import policy
+
+    # ---- ① 登录失效 → AUTH ----
+    auth_cases = [
+        ("jd", _FakePage("https://passport.jd.com/new/login.aspx"), "被踢回登录页"),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/login.html"), "被踢回登录页"),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", '{"error_code=40001"}'),
+         "40001 = 登录已过期（错误码表实测）"),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", "needLogin"), "needLogin"),
+        ("xianyu", _FakePage("https://www.goofish.com/search", "",
+                             '{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"]}'),
+         "淘系令牌过期（注意平台的拼写就是 EXOIRED）"),
+        ("xianyu", _FakePage("https://www.goofish.com/search", "", "FAIL_SYS_SESSION_EXPIRED"),
+         "会话过期"),
+    ]
+    bad = []
+    for code, page, label in auth_cases:
+        st = policy.detect_page_state(page, code)
+        if not st or st[0] != policy.AUTH:
+            bad.append(f"{label}: 期望 AUTH，实际 {st}")
+    check(f"登录失效被单独识别为 AUTH（{len(auth_cases)} 例）", not bad, "; ".join(bad))
+
+    # ---- ② 风控 → BLOCKED ----
+    blocked_cases = [
+        ("jd", _FakePage("https://search.jd.com/Search", "", "抱歉由于访问频繁导致无法搜索")),
+        ("jd", _FakePage("https://search.jd.com/risk_handler?x=1")),
+        ("xianyu", _FakePage("https://www.goofish.com/punish?x5secdata=abc")),
+        ("xianyu", _FakePage("https://www.goofish.com/search", "", "被挤爆啦，请稍后再试")),
+        ("xianyu", _FakePage("https://www.goofish.com/search", "", "哎哟喂，出错了")),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", '{"error_code=54001"}')),
+    ]
+    bad = []
+    for code, page in blocked_cases:
+        st = policy.detect_page_state(page, code)
+        if not st or st[0] != policy.BLOCKED:
+            bad.append(f"{code}: 期望 BLOCKED，实际 {st}")
+    check(f"风控被单独识别为 BLOCKED（{len(blocked_cases)} 例）", not bad, "; ".join(bad))
+
+    # ---- ③ 平台明确无结果 → EMPTY ----
+    empty_cases = [
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", '{"error_code=41002"}'),
+         "41002 已下架"),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", "商品已售罄"), "已售罄"),
+        ("xianyu", _FakePage("https://www.goofish.com/search", "闲鱼", "暂无相关宝贝"), "闲鱼空态"),
+        ("jd", _FakePage("https://search.jd.com/Search", "京东", "抱歉，没有找到相关的商品"),
+         "京东空态"),
+    ]
+    bad = []
+    for code, page, label in empty_cases:
+        st = policy.detect_page_state(page, code)
+        if not st or st[0] != policy.EMPTY:
+            bad.append(f"{label}: 期望 EMPTY，实际 {st}")
+    check(f"平台明确无结果被单独识别为 EMPTY（{len(empty_cases)} 例）", not bad, "; ".join(bad))
+
+    # ---- ④ 三种状态互不串味：同一页面在不同平台不能判成不同类 ----
+    # 三个平台都配了「系统繁忙」，用它验证「同一份页面对谁都是 BLOCKED」
+    check("三个平台都能识别「系统繁忙」为 BLOCKED",
+          all((policy.detect_page_state(
+              _FakePage("https://x.com/a", "", "系统繁忙，请稍后再试"), c) or ("",))[0]
+              == policy.BLOCKED for c in ("jd", "pdd", "xianyu")))
+    check("正常商品页判 None（三态之外）",
+          policy.detect_page_state(_FakePage(
+              "https://search.jd.com/Search?keyword=RTX+5070", "RTX 5070 - 商品搜索 - 京东",
+              "京东 全分类 搜索 RTX 5070 ¥4599.00 自营 加入购物车"), "jd") is None)
+
+    # ---- ⑤ 断言函数：风控与登录失效抛**不同**异常 ----
+    try:
+        policy.assert_not_rate_limited(
+            _FakePage("https://www.goofish.com/search", "", "非法访问"), "xianyu")
+        check("风控页抛 RateLimitError", False, "没抛")
+    except policy.RateLimitError:
+        check("风控页抛 RateLimitError", True)
+    except Exception as exc:  # noqa: BLE001
+        check("风控页抛 RateLimitError", False, f"抛了 {type(exc).__name__}")
+
+    try:
+        policy.assert_not_rate_limited(
+            _FakePage("https://mobile.yangkeduo.com/login.html"), "pdd")
+        check("登录失效页抛 AuthExpiredError（不是 RateLimitError）", False, "没抛")
+    except policy.AuthExpiredError:
+        check("登录失效页抛 AuthExpiredError（不是 RateLimitError）", True)
+    except Exception as exc:  # noqa: BLE001
+        check("登录失效页抛 AuthExpiredError（不是 RateLimitError）", False,
+              f"抛了 {type(exc).__name__}")
+
+    check("AuthExpiredError 不是 RateLimitError 的子类"
+          "（否则 base 会把它当熔断、推进退避阶梯）",
+          not issubclass(policy.AuthExpiredError, policy.RateLimitError))
+
+    # ---- ⑥ 空态：`assert_not_rate_limited` **不**抛，`raise_if_empty` 才抛 ----
+    empty_page = _FakePage("https://www.goofish.com/search", "闲鱼", "暂无相关宝贝")
+    try:
+        policy.assert_not_rate_limited(empty_page, "xianyu")
+        check("空态不会被 assert_not_rate_limited 当成异常（否则会误熔断）", True)
+    except Exception as exc:  # noqa: BLE001
+        check("空态不会被 assert_not_rate_limited 当成异常（否则会误熔断）", False,
+              f"抛了 {type(exc).__name__}")
+
+    try:
+        policy.raise_if_empty(empty_page, "xianyu")
+        check("取数 0 条后 raise_if_empty 抛 EmptyResult", False, "没抛")
+    except policy.EmptyResult:
+        check("取数 0 条后 raise_if_empty 抛 EmptyResult", True)
+    except Exception as exc:  # noqa: BLE001
+        check("取数 0 条后 raise_if_empty 抛 EmptyResult", False, f"抛了 {type(exc).__name__}")
+
+    try:
+        policy.raise_if_empty(_FakePage("https://www.goofish.com/search", "闲鱼",
+                                        "显卡 ¥1899 我想要"), "xianyu")
+        check("正常页 raise_if_empty 不抛（不能把「有结果」判成空）", True)
+    except Exception as exc:  # noqa: BLE001
+        check("正常页 raise_if_empty 不抛（不能把「有结果」判成空）", False,
+              f"抛了 {type(exc).__name__}")
+
+    # ---- ⑦ 策略接线：预热 / 正向 URL / 空态 都配上了 ----
+    check("京东与闲鱼都配了首页预热（新会话第一跳先养热）",
+          bool(policy.policy_for("jd").warmup_url)
+          and bool(policy.policy_for("xianyu").warmup_url))
+    check("拼多多留空预热（它自带「被劫持后自愈」的预热，避免一个会话访问两次首页）",
+          policy.policy_for("pdd").warmup_url is None)
+    check("三个平台都有正向 URL 判据",
+          all(policy.policy_for(c).expected_url_prefixes for c in ("jd", "pdd", "xianyu")))
+    check("正向 URL 判据**默认不熔断**（只观测）",
+          policy._enforce_url_prefix() is False)
+    check("三个平台都有空态判据",
+          all(policy.policy_for(c).empty_indicators for c in ("jd", "pdd", "xianyu")))
+
+
+def test_breaker_auth_channel() -> None:
+    """登录失效走**独立通道**：不进阶梯、能被「人工干预」自动解除。"""
+    import tempfile
+    import shutil
+    import pathlib as _pl
+
+    from app.services import breaker
+
+    tmp = _pl.Path(tempfile.mkdtemp(prefix="bt_"))
+    orig_file = breaker.BREAKER_FILE
+    breaker.BREAKER_FILE = tmp / "breaker.json"
+    try:
+        breaker.clear()
+
+        # ① 登记登录失效 → 不推阶梯、不冷却
+        breaker.note_auth_expired("pdd", "login.html", "拼多多")
+        check("登录失效被记录", "pdd" in breaker.auth_expired_sources())
+        check("登录失效**不**推进退避阶梯（trips 仍为 0）",
+              breaker.consecutive_trips("pdd") == 0, str(breaker.consecutive_trips("pdd")))
+        check("登录失效**不**产生冷却",
+              breaker.cooldown_remaining("pdd") == 0.0)
+
+        # ② 风控 trip 会推进阶梯（与上面对比）
+        breaker.trip("pdd", reason="系统繁忙")
+        check("风控 trip 会推进阶梯（与登录失效区别对待）",
+              breaker.consecutive_trips("pdd") >= 1 and breaker.cooldown_remaining("pdd") > 0)
+
+        # ③ 「人工干预」只对**登录失效类**的冷却生效
+        check("原因不是登录类时，human_intervened 为假（先清掉 auth 标记）",
+              breaker.clear_auth_expired("jd") is not None
+              and not breaker.human_intervened("jd"))
+        bf = breaker.BREAKER_FILE
+        bf.write_text(
+            '{"version":1,"sources":{"jd":{"until":%f,"until_text":"","seconds":60,'
+            '"cooldown_text":"1m","reason":"访问频繁","severity":"hard",'
+            '"at":"2020-01-01 00:00:00","at_ts":1577836800.0,"trips":3}},"auth":{}}'
+            % (breaker.time.time() + 9999), encoding="utf-8")
+        check("风控类冷却**不**被「人工干预」解除（否则一次无关重登会清掉真风控冷却）",
+              breaker.human_intervened("jd") is False)
+
+        bf.write_text(
+            '{"version":1,"sources":{"pdd":{"until":%f,"until_text":"","seconds":60,'
+            '"cooldown_text":"1m","reason":"login.html","severity":"hard",'
+            '"at":"2020-01-01 00:00:00","at_ts":1577836800.0,"trips":3}},"auth":{}}'
+            % (breaker.time.time() + 9999), encoding="utf-8")
+        if breaker._session_file("pdd") is None:
+            check("（跳过）pdd 会话文件不存在，无法验证人工干预", True)
+        else:
+            check("登录类冷却 + 会话文件更新 → 判为人工干预过",
+                  breaker.human_intervened("pdd") is True)
+            ok, _left = breaker.fast_fail("pdd", "拼多多")
+            check("人工干预后 fast_fail 放行（冷却被自动解除）", ok is True)
+
+        # ④ 损坏文件保留现场（不静默丢弃）
+        bf.write_text("{ 这不是 JSON", encoding="utf-8")
+        got = breaker._load()
+        check("损坏文件被当成「无冷却」（采集不该因它停摆）",
+              got.get("sources") == {} and got.get("auth") == {})
+        check("损坏文件被**改名保留**（现场不丢）",
+              bool(list(tmp.glob("*.corrupt.*"))))
+
+        # ⑤ 原子写：不留下半截 tmp
+        breaker.clear()
+        breaker.trip("jd", reason="访问频繁")
+        check("写完之后没有残留 .tmp 文件",
+              not list(tmp.glob("*.tmp")), str(list(tmp.glob("*.tmp"))))
+
+        # ⚠️ `fsync` 的持久性**无法用行为断言观测**（要断电/杀进程才能复现），
+        #    所以这里只能锚定到实现：`_save` 必须 flush + fsync 之后再 replace。
+        #    这条恰恰是反向验证发现的盲区 —— 退回裸 write_text 时前面几条都照样通过。
+        import inspect as _inspect
+
+        save_src = _inspect.getsource(breaker._save)
+        check("_save 走 flush + os.fsync + replace（断电时不只落盘文件名）",
+              "os.fsync" in save_src and "flush()" in save_src
+              and ".replace(" in save_src, save_src[:160])
+        load_src = _inspect.getsource(breaker._load)
+        check("_load 对非法 JSON 调 _quarantine 隔离（现场不丢）",
+              "_quarantine" in load_src)
+        check("_quarantine 用 replace 改名（不是删除）",
+              "BREAKER_FILE.replace(" in _inspect.getsource(breaker._quarantine))
+
+        # ⚠️ `fsync` 的持久性**无法用行为断言观测**（要断电/杀进程才能复现），
+        #    所以这里只能锚定到实现：`_save` 必须 flush + fsync 之后再 replace。
+        #    这条恰恰是反向验证发现的盲区 —— 退回裸 write_text 时前面几条都照样通过。
+        import inspect as _inspect
+
+        save_src = _inspect.getsource(breaker._save)
+        check("_save 走 flush + os.fsync + replace（断电时不只落盘文件名）",
+              "os.fsync" in save_src and "flush()" in save_src
+              and ".replace(" in save_src, save_src[:160])
+        load_src = _inspect.getsource(breaker._load)
+        check("_load 对非法 JSON 调 _quarantine 隔离（现场不丢）",
+              "_quarantine" in load_src)
+        check("_quarantine 用 replace 改名（不是删除）",
+              "BREAKER_FILE.replace(" in _inspect.getsource(breaker._quarantine))
+        check("写入的内容能被读回（fsync + replace 生效）",
+              breaker.entry_of("jd").get("reason") == "访问频繁")
+    finally:
+        breaker.BREAKER_FILE = orig_file
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_listing_snapshots() -> None:
+    """单品快照：**拿不到平台原生商品 id 就不写**（宁可少写也不污染）。"""
+    from datetime import date as _date
+
+    from app.collectors.base import Quote
+    from app.services import listing_history as LH
+    from app.services.pipeline import _snapshot_row
+
+    class _Plat:
+        id = 6
+
+    def quote(**extra):
+        return Quote(platform_code="xianyu", title_raw="华硕 RTX4090 猛禽",
+                     price=23000.0, condition="二手",
+                     url="https://www.goofish.com/item?id=1", seller="老王",
+                     extra={"category": "gpu", "keyword": "RTX 4090", **extra})
+
+    # ① 没有商品 id → 不写（否则只能退化成随改标题漂移的键）
+    check("没有 item_id/ware_id 时返回 None（不写进去污染）",
+          _snapshot_row(quote(publish_time=""), 1, _Plat(), _date.today(),
+                        "", "b1", "xianyu") is None)
+
+    # ② 有 item_id → 完整字段
+    row = _snapshot_row(quote(item_id="1081163330292", area="广东", want_num=56,
+                              tags=["包邮", "验货宝"], ori_price=25999,
+                              publish_time="2026-10-02 00:20:37"),
+                        1, _Plat(), _date.today(), "", "b1", "xianyu")
+    check("有 item_id 时产出完整快照行", row is not None
+          and set(row) == set(LH.SNAPSHOT_KEYS), str(sorted(row or {})))
+    check("快照行带上卖家/地区/想要人数/标签/原价/发布时间",
+          row["seller"] == "老王" and row["area"] == "广东" and row["want_num"] == 56
+          and row["tags"] == "包邮,验货宝" and row["ori_price"] == 25999
+          and row["publish_time"] == "2026-10-02 00:20:37")
+    check("京东的 ware_id 同样被当作商品身份",
+          _snapshot_row(quote(ware_id="100012043978"), 1, _Plat(), _date.today(),
+                        "", "b1", "jd")["item_id"] == "100012043978")
+
+    # ③ 行必须字段齐全 —— 缺键会让整批 INSERT 参数个数不一致
+    try:
+        LH.record_snapshots(None, [{"platform_id": 1}])
+        check("字段不齐时在入口报错（而不是让 SQLAlchemy 报错）", False, "没报错")
+    except ValueError:
+        check("字段不齐时在入口报错（而不是让 SQLAlchemy 报错）", True)
+    except Exception as exc:  # noqa: BLE001
+        check("字段不齐时在入口报错（而不是让 SQLAlchemy 报错）", False,
+              f"抛了 {type(exc).__name__}")
+
+    # ④ 读侧的三条闸门必须写在 SQL 里（项目教训：过滤散落必漏）
+    from app.services import listing_history as _LH
+    import inspect
+
+    # ⚠️ 必须**逐函数**检查，不能把两个函数的源码拼起来查子串 ——
+    #    拼起来的话，从其中一个删掉闸门仍然能通过（项目教训 #1 的老坑）。
+    for fname in ("listing_drops", "newest_listings"):
+        src = inspect.getsource(getattr(_LH, fname))
+        for gate, why in (("is_synthetic = 0", "模拟数据"),
+                          ("pf.is_active = 1", "停用平台"),
+                          ("p.is_active = 1", "归档品类")):
+            check(f"{fname} 带「{why}」闸门", gate in src, f"{fname} 缺少 {gate!r}")
+
+
+def test_publish_time_normalization() -> None:
+    """发布时间归一 —— 接口给**毫秒时间戳**、DOM 给相对文案，混着入库会污染统计。"""
+    from app.collectors import normalize as N
+
+    cases = [
+        (1759320000000, "2025-10-01 20:00:00", "毫秒时间戳（闲鱼接口真实形态）"),
+        (1759320000, "2025-10-01 20:00:00", "秒时间戳"),
+        ("1759320000000", "2025-10-01 20:00:00", "字符串毫秒"),
+        ("2026-10-02 03:20:00", "2026-10-02 03:20:00", "已是 ISO"),
+        ("2026-10-02T03:20:00.000Z", "2026-10-02 03:20:00", "ISO 带 T 与毫秒/时区"),
+        ("37分钟前发布", "", "相对文案 → 留空（不猜）"),
+        ("3天前", "", "相对文案 → 留空"),
+        ("", "", "空串"),
+        (None, "", "None"),
+    ]
+    bad = []
+    for value, expect, label in cases:
+        got = N.parse_publish_time(value)
+        if got != expect:
+            bad.append(f"{label}: 期望 {expect!r} 实际 {got!r}")
+    check(f"发布时间归一（{len(cases)} 例）", not bad, "; ".join(bad))
+
+    check("相对文案**不猜**（猜出来的时间会污染按天统计）",
+          N.parse_publish_time("昨天") == "" and N.parse_publish_time("刚刚") == "")
+
+
+def test_login_probe_shape() -> None:
+    """登录探针：**探不出来**与**明确未登录**必须分开。"""
+    from app.services import login_probe as LP
+
+    check("京东与闲鱼配了探针", LP.supported("jd") and LP.supported("goofish"))
+    check("拼多多**如实标记为不支持**（不硬凑假探针）",
+          not LP.supported("pdd") and "pdd" in LP.UNSUPPORTED)
+
+    r = LP.probe_login(None, "pdd")
+    check("不支持的站点返回 logged_in=None（不是 False）",
+          r["supported"] is False and r["logged_in"] is None, str(r))
+
+    check("京东探针用 me-api 的 retcode 判据",
+          "me-api.jd.com" in LP.PROBES["jd"]["url"]
+          and "1001" in LP.PROBES["jd"]["logout_markers"])
+    check("闲鱼探针用强鉴权页（未登录会被重定向）",
+          "bought" in LP.PROBES["goofish"]["url"])
+
+
 def test_registry_is_clean() -> None:
     """元守卫：测试注册表与定义必须一一对应。
 
@@ -3394,6 +3797,12 @@ def main() -> int:
         test_dedupe_identity,
         test_xianyu_api_parse,
         test_registry_is_clean,
+        test_failure_triage,
+        test_breaker_auth_channel,
+        test_listing_snapshots,
+        test_publish_time_normalization,
+        test_login_probe_shape,
+        test_cli_collect_guard,
         test_price_normalization,
         test_browser_proxy_policy,
         test_ranking_direction,

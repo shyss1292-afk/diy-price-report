@@ -1,0 +1,395 @@
+{
+  "purpose": "2026-10-01 GitHub 爬虫项目调研的证据清单 —— 报告中每条代码引用均可按此复核",
+  "collected_at": "2026-10-01T23:27:15",
+  "note": "只记录来源与校验值，不复制第三方源码。raw.githubusercontent.com 需经代理访问（直连被阻断）。",
+  "file_count": 42,
+  "repos": [
+    "FearlessPeople/xianyu_spider",
+    "LoseNine/Crack-JS-Spider",
+    "SZFsir/pddSpider",
+    "ShilongLee/Crawler",
+    "hiddendevj/JDPackage",
+    "pbeenigg/LittleCrawler",
+    "superboyyy/xianyu_spider"
+  ],
+  "files": [
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "README.md",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/README.md",
+      "bytes": 5449,
+      "lines": 176,
+      "sha256_12": "30aa4a6c1d89"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "spider.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/spider.py",
+      "bytes": 3179,
+      "lines": 92,
+      "sha256_12": "dc2c28915202"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/mtop.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/mtop.py",
+      "bytes": 46428,
+      "lines": 1327,
+      "sha256_12": "bf28e63e2d6b"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/session.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/session.py",
+      "bytes": 707,
+      "lines": 27,
+      "sha256_12": "60522baead53"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/config.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/config.py",
+      "bytes": 737,
+      "lines": 25,
+      "sha256_12": "03db59ee9640"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/protocol.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/protocol.py",
+      "bytes": 8690,
+      "lines": 287,
+      "sha256_12": "b39789a7813f"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/search.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/search.py",
+      "bytes": 4130,
+      "lines": 109,
+      "sha256_12": "aee4ddb1ae0d"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/search_query.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/search_query.py",
+      "bytes": 4376,
+      "lines": 130,
+      "sha256_12": "f58569b3dd87"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/im_client.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/im_client.py",
+      "bytes": 10058,
+      "lines": 296,
+      "sha256_12": "e6da66ab94b7"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/qr_browser.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/qr_browser.py",
+      "bytes": 13745,
+      "lines": 380,
+      "sha256_12": "0f39dad6853c"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/login_trace.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/login_trace.py",
+      "bytes": 4414,
+      "lines": 130,
+      "sha256_12": "546e91946330"
+    },
+    {
+      "repo": "superboyyy/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu/app.py",
+      "raw_url": "https://raw.githubusercontent.com/superboyyy/xianyu_spider/main/xianyu/app.py",
+      "bytes": 1526,
+      "lines": 57,
+      "sha256_12": "c5b5a7be40f5"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "README.md",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/README.md",
+      "bytes": 6097,
+      "lines": 197,
+      "sha256_12": "60f09b33dbb5"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/core/base_crawler.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/core/base_crawler.py",
+      "bytes": 3668,
+      "lines": 150,
+      "sha256_12": "09b15c3888aa"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/utils/cdp_browser.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/utils/cdp_browser.py",
+      "bytes": 16775,
+      "lines": 428,
+      "sha256_12": "c1d7cd65a36a"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/utils/browser_launcher.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/utils/browser_launcher.py",
+      "bytes": 11843,
+      "lines": 328,
+      "sha256_12": "a5dbe4f4197f"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/utils/slider_util.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/utils/slider_util.py",
+      "bytes": 5564,
+      "lines": 161,
+      "sha256_12": "5653de00ca9c"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/utils/easing.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/utils/easing.py",
+      "bytes": 1537,
+      "lines": 71,
+      "sha256_12": "364492f79b36"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/services/proxy/proxy_ip_pool.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/services/proxy/proxy_ip_pool.py",
+      "bytes": 5115,
+      "lines": 160,
+      "sha256_12": "7de711122a1f"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/services/proxy/proxy_mixin.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/services/proxy/proxy_mixin.py",
+      "bytes": 1968,
+      "lines": 62,
+      "sha256_12": "191d81507387"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/platforms/xhs/playwright_sign.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/platforms/xhs/playwright_sign.py",
+      "bytes": 6603,
+      "lines": 226,
+      "sha256_12": "e9395e7a4de1"
+    },
+    {
+      "repo": "pbeenigg/LittleCrawler",
+      "ref": "main",
+      "path": "src/platforms/xhs/client.py",
+      "raw_url": "https://raw.githubusercontent.com/pbeenigg/LittleCrawler/main/src/platforms/xhs/client.py",
+      "bytes": 21646,
+      "lines": 631,
+      "sha256_12": "845dc54ac475"
+    },
+    {
+      "repo": "ShilongLee/Crawler",
+      "ref": "main",
+      "path": "readme.md",
+      "raw_url": "https://raw.githubusercontent.com/ShilongLee/Crawler/main/readme.md",
+      "bytes": 4846,
+      "lines": 127,
+      "sha256_12": "62ea0e36619e"
+    },
+    {
+      "repo": "ShilongLee/Crawler",
+      "ref": "main",
+      "path": "config/config.yaml",
+      "raw_url": "https://raw.githubusercontent.com/ShilongLee/Crawler/main/config/config.yaml",
+      "bytes": 143,
+      "lines": 6,
+      "sha256_12": "9f3e24874d9c"
+    },
+    {
+      "repo": "ShilongLee/Crawler",
+      "ref": "main",
+      "path": "lib/requests/requests.py",
+      "raw_url": "https://raw.githubusercontent.com/ShilongLee/Crawler/main/lib/requests/requests.py",
+      "bytes": 1544,
+      "lines": 49,
+      "sha256_12": "c288c28cd9ba"
+    },
+    {
+      "repo": "ShilongLee/Crawler",
+      "ref": "main",
+      "path": "service/jd/logic/common.py",
+      "raw_url": "https://raw.githubusercontent.com/ShilongLee/Crawler/main/service/jd/logic/common.py",
+      "bytes": 748,
+      "lines": 17,
+      "sha256_12": "8bbd074b28f0"
+    },
+    {
+      "repo": "ShilongLee/Crawler",
+      "ref": "main",
+      "path": "service/jd/logic/search.py",
+      "raw_url": "https://raw.githubusercontent.com/ShilongLee/Crawler/main/service/jd/logic/search.py",
+      "bytes": 3019,
+      "lines": 74,
+      "sha256_12": "cd04658688c7"
+    },
+    {
+      "repo": "ShilongLee/Crawler",
+      "ref": "main",
+      "path": "service/jd/views/add_account.py",
+      "raw_url": "https://raw.githubusercontent.com/ShilongLee/Crawler/main/service/jd/views/add_account.py",
+      "bytes": 641,
+      "lines": 21,
+      "sha256_12": "ac4cd8ffecca"
+    },
+    {
+      "repo": "ShilongLee/Crawler",
+      "ref": "main",
+      "path": "docs/api/jd/jd.md",
+      "raw_url": "https://raw.githubusercontent.com/ShilongLee/Crawler/main/docs/api/jd/jd.md",
+      "bytes": 2612,
+      "lines": 121,
+      "sha256_12": "8ad416d41ef3"
+    },
+    {
+      "repo": "SZFsir/pddSpider",
+      "ref": "master",
+      "path": "README.md",
+      "raw_url": "https://raw.githubusercontent.com/SZFsir/pddSpider/master/README.md",
+      "bytes": 2957,
+      "lines": 63,
+      "sha256_12": "82fa0f2e917b"
+    },
+    {
+      "repo": "SZFsir/pddSpider",
+      "ref": "master",
+      "path": "Spider.py",
+      "raw_url": "https://raw.githubusercontent.com/SZFsir/pddSpider/master/Spider.py",
+      "bytes": 6206,
+      "lines": 168,
+      "sha256_12": "a34792c64e26"
+    },
+    {
+      "repo": "SZFsir/pddSpider",
+      "ref": "master",
+      "path": "core/proxy.py",
+      "raw_url": "https://raw.githubusercontent.com/SZFsir/pddSpider/master/core/proxy.py",
+      "bytes": 18909,
+      "lines": 621,
+      "sha256_12": "6c96f55341d0"
+    },
+    {
+      "repo": "SZFsir/pddSpider",
+      "ref": "master",
+      "path": "core/captcha.py",
+      "raw_url": "https://raw.githubusercontent.com/SZFsir/pddSpider/master/core/captcha.py",
+      "bytes": 2015,
+      "lines": 64,
+      "sha256_12": "29832671d091"
+    },
+    {
+      "repo": "SZFsir/pddSpider",
+      "ref": "master",
+      "path": "core/seleniumoperate.py",
+      "raw_url": "https://raw.githubusercontent.com/SZFsir/pddSpider/master/core/seleniumoperate.py",
+      "bytes": 11160,
+      "lines": 330,
+      "sha256_12": "de1ab02eb818"
+    },
+    {
+      "repo": "hiddendevj/JDPackage",
+      "ref": "master",
+      "path": "readme.md",
+      "raw_url": "https://raw.githubusercontent.com/hiddendevj/JDPackage/master/readme.md",
+      "bytes": 3067,
+      "lines": 88,
+      "sha256_12": "1be7030f0484"
+    },
+    {
+      "repo": "hiddendevj/JDPackage",
+      "ref": "master",
+      "path": "JDPackage/mlogin.py",
+      "raw_url": "https://raw.githubusercontent.com/hiddendevj/JDPackage/master/JDPackage/mlogin.py",
+      "bytes": 26619,
+      "lines": 520,
+      "sha256_12": "4f5ba4be6a77"
+    },
+    {
+      "repo": "hiddendevj/JDPackage",
+      "ref": "master",
+      "path": "JDPackage/mloginPYV8.py",
+      "raw_url": "https://raw.githubusercontent.com/hiddendevj/JDPackage/master/JDPackage/mloginPYV8.py",
+      "bytes": 26209,
+      "lines": 522,
+      "sha256_12": "277302d5b699"
+    },
+    {
+      "repo": "hiddendevj/JDPackage",
+      "ref": "master",
+      "path": "JDPackage/spider.py",
+      "raw_url": "https://raw.githubusercontent.com/hiddendevj/JDPackage/master/JDPackage/spider.py",
+      "bytes": 3972,
+      "lines": 115,
+      "sha256_12": "eb45a7cd53a4"
+    },
+    {
+      "repo": "LoseNine/Crack-JS-Spider",
+      "ref": "master",
+      "path": "README.md",
+      "raw_url": "https://raw.githubusercontent.com/LoseNine/Crack-JS-Spider/master/README.md",
+      "bytes": 1428,
+      "lines": 45,
+      "sha256_12": "d5c7135310ea"
+    },
+    {
+      "repo": "LoseNine/Crack-JS-Spider",
+      "ref": "master",
+      "path": "拼多多/anti_content.js",
+      "raw_url": "https://raw.githubusercontent.com/LoseNine/Crack-JS-Spider/master/拼多多/anti_content.js",
+      "bytes": 179356,
+      "lines": 3718,
+      "sha256_12": "1d3bd268052b"
+    },
+    {
+      "repo": "FearlessPeople/xianyu_spider",
+      "ref": "main",
+      "path": "README.md",
+      "raw_url": "https://raw.githubusercontent.com/FearlessPeople/xianyu_spider/main/README.md",
+      "bytes": 3968,
+      "lines": 96,
+      "sha256_12": "ece1e9a23fd6"
+    },
+    {
+      "repo": "FearlessPeople/xianyu_spider",
+      "ref": "main",
+      "path": "xianyu.py",
+      "raw_url": "https://raw.githubusercontent.com/FearlessPeople/xianyu_spider/main/xianyu.py",
+      "bytes": 8075,
+      "lines": 271,
+      "sha256_12": "5986ea440bb2"
+    }
+  ]
+}

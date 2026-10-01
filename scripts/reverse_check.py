@@ -56,6 +56,7 @@ ROUTES = PROJ / "app/api/routes.py"
 SERVICE = PROJ / "scripts/service.sh"
 PDD = PROJ / "app/collectors/pdd_source.py"
 JD = PROJ / "app/collectors/jd_source.py"
+POLICY = PROJ / "app/collectors/policy.py"
 BASE = PROJ / "app/collectors/base.py"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
@@ -374,7 +375,7 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
     ),
     (
         "限流特征正文匹配退回大小写敏感（大写特征静默失效）",
-        BREAKER.replace("breaker.py", "policy.py"),
+        POLICY,
         "    probe_lower = probe.lower()\n",
         "    probe_lower = probe\n",
     ),

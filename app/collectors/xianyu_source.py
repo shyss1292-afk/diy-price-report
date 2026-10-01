@@ -88,6 +88,59 @@ _EXTRACT_JS = r"""() => {
 
 SEARCH_API_MARK = "mtop.taobao.idlemtopsearch.pc.search"
 
+# 「想要人数」的文案形态：`56人想要` / `1.2万人想要`
+_WANT_RE = __import__("re").compile(r"(\d+(?:\.\d+)?(?:万)?)\s*人想要")
+
+# 卡片标签里值得留的（其余是装饰）
+_TAG_OF_INTEREST = ("验货宝", "包邮", "急售", "可小刀")
+
+
+def _want_num(ex: dict, args: dict) -> int:
+    """想要人数 —— 两条来源，**优先 fishTags 里的文案**。
+
+    为什么优先文案而不是 `wantNum` 字段：文案才是页面上真正展示的那个数，
+    而 `wantNum` 有时是 `'NaN'` 字符串、且实测与展示值可能不一致
+    （`ai-goofish-monitor/src/parsers.py:38` 直接把它当默认值 `'NaN'` 用）。
+    文案路径的依据是 `GuDong2003/utils/item_search.py:1015-1029` 的正则，
+    并要处理「万」单位（`1.2万人想要` → 12000）。
+
+    取不到返回 0（而不是 None）—— 它在库里的语义是"未知/为零"，两者都不该阻止入库。
+    """
+    for tag in ((ex.get("fishTags") or {}) or {}).values():
+        for item in (tag or {}).get("tagList") or []:
+            content = str(((item or {}).get("data") or {}).get("content") or "")
+            m = _WANT_RE.search(content)
+            if m:
+                raw = m.group(1)
+                try:
+                    if raw.endswith("万"):
+                        return int(float(raw[:-1]) * 10000)
+                    return int(float(raw))
+                except ValueError:
+                    continue
+    try:
+        return int(float(args.get("wantNum")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fish_tags(ex: dict, args: dict) -> list[str]:
+    """卡片标签（包邮 / 验货宝 / 急售…）。
+
+    依据 `ai-goofish-monitor/src/parsers.py:42-48`：
+      · `clickParam.args.tag == "freeship"` → 包邮（是**独立字段**，不在 fishTags 里）
+      · `fishTags.<rN>.tagList[].data.content` 里出现「验货宝」等文案
+    """
+    tags: list[str] = []
+    if str(args.get("tag") or "") == "freeship":
+        tags.append("包邮")
+    for tag in ((ex.get("fishTags") or {}) or {}).values():
+        for item in (tag or {}).get("tagList") or []:
+            content = str(((item or {}).get("data") or {}).get("content") or "").strip()
+            if content and content in _TAG_OF_INTEREST and content not in tags:
+                tags.append(content)
+    return tags
+
 
 def parse_search_payload(payload) -> list[dict]:
     """把闲鱼搜索接口的响应解析成行。
@@ -141,9 +194,24 @@ def parse_search_payload(payload) -> list[dict]:
                     "title": title,
                     "price": price,
                     "item_url": item_url,
-                    "publish_time": str(args.get("publishTime") or ""),
+                    # publishTime 是**毫秒时间戳**（`ai-goofish-monitor/src/parsers.py:59`），
+                    # 归一成 ISO 日期后入库，免得下游各自猜单位
+                    "publish_time": normalize.parse_publish_time(
+                        args.get("publishTime")
+                    ),
                     "area": str(ex.get("area") or ""),
                     "item_id": item_id,
+                    # ---- 以下三个字段此前完全没取（2026-10-02 补）----
+                    # 同一份 resultList 里现成就有，DOM 上却看不到：
+                    #   seller  卖家昵称 —— 也是"这台机器是不是同一个卖家反复挂"的线索
+                    #   ori_price 原价（划掉价）—— 有它才算得出"降了多少"
+                    #   want_num / tags —— 热度与保障信息
+                    "seller": str(
+                        main.get("userNickName") or ex.get("userNickName") or ""
+                    ).strip(),
+                    "ori_price": normalize.parse_price(ex.get("oriPrice")),
+                    "want_num": _want_num(ex, args),
+                    "tags": _fish_tags(ex, args),
                 }
             )
         except Exception:  # noqa: BLE001 —— 单条脏数据不该毁掉整页
@@ -242,7 +310,10 @@ class XianyuCollector(BaseCollector):
                 # navigate 按平台策略导航并先查一次限流（闲鱼惩罚页是 `punish` 页）。
                 # RateLimitError 是熔断信号，原样上抛，不在这里吞掉。
                 policy.navigate(page, url, self.code, timeout=self.page_timeout)
-            except policy.RateLimitError:
+            except (policy.RateLimitError, policy.AuthExpiredError):
+                # ⚠️ `AuthExpiredError` 必须一起上抛：它是"去重新登录"的信号，
+                #    被下面的 `except Exception` 吞掉就会退化成"记一笔失败、
+                #    继续下一个型号"，最后被 empty_streak 推断成"被限流"—— 归因指反。
                 raise
             except Exception as exc:
                 # ⚠️ 「页面/浏览器已关闭」**不能**被吞成"搜索失败"。
@@ -293,6 +364,11 @@ class XianyuCollector(BaseCollector):
                     "闲鱼 %s 接口未命中，回落 DOM 解析：%d 条", product.model, len(rows),
                 )
 
+        if not rows:
+            # 两条路都是 0 条 —— 先问平台自己"是不是真的没有"，再决定要不要
+            # 让它计入"可疑"的证据链。见 `policy.raise_if_empty` 的说明。
+            policy.raise_if_empty(page, self.code)
+
         quotes: list[Quote] = []
         for row in rows:
             title = (row.get("title") or "").strip()
@@ -308,6 +384,10 @@ class XianyuCollector(BaseCollector):
                     # 接口给的是**商品页**链接（fleamarket:// 已归一为 https），
                     # 比"搜索页 URL"有用得多 —— 也是商品级去重键的基础
                     url=(row.get("item_url") or url),
+                    # ⚠️ 这里长期有个实证缺陷：`parse_search_payload` **从不设置**
+                    #    `seller` 键，于是 `row.get("seller")` 恒为 None，
+                    #    落库的 `Quote.seller` **恒为字面量 "闲鱼卖家"** ——
+                    #    `userNickName` 从未被读过。现在真的取到了。
                     seller=(row.get("seller") or "闲鱼卖家"),
                     extra={
                         "category": product.category,
@@ -319,6 +399,11 @@ class XianyuCollector(BaseCollector):
                         # 排障的**原始身份** —— 没有它，"同一商品为什么算了两次"
                         # 就无从对照。
                         "item_id": row.get("item_id") or "",
+                        # 原价 / 想要人数 / 标签：DOM 上看不到，接口里现成有。
+                        # 原价是"这条挂牌降了多少"的分母，而降价是二手捡漏的核心信号。
+                        "ori_price": row.get("ori_price"),
+                        "want_num": row.get("want_num") or 0,
+                        "tags": row.get("tags") or [],
                     },
                 )
             )

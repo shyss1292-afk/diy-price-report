@@ -140,11 +140,18 @@ def _find_product_list(node, depth: int = 0):
     return None
 
 
-def parse_search_payload(payload: object) -> list[dict]:
+def parse_search_payload(payload: object, stats: dict | None = None) -> list[dict]:
     """把京东搜索接口的载荷翻译成统一 rows（纯函数，可用合成样本单测）。
 
     与闲鱼 `parse_search_payload` **同契约**（同样的键），
     这样上层 `_quotes_from_rows` 两层能共用一套字段口径。
+
+    `stats` 是**可选的**出参（默认 None = 无副作用）：填「商品数组里发现多少条、
+    其中多少条因缺价格/缺标题被丢」。为什么要它 —— 现在"整页丢空"和
+    "京东把价格挪走了"在日志里长得一样（都是 0 条）；有了它，
+    下一次改版能立刻从分段计数里看出来。
+    依据 `muxue-yqy/core/data_extractor.py:56-74` 的 `ExtractionResult.is_empty`
+    （"采到任何一个关键字段就不算空"，比"必须解析出价格"抗改版）。
     """
     if isinstance(payload, (str, bytes)):
         try:
@@ -152,8 +159,16 @@ def parse_search_payload(payload: object) -> list[dict]:
         except Exception:          # noqa: BLE001
             return []
     items = _find_product_list(payload)
+    if stats is not None:
+        # 「载荷里有没有商品数组」本身就是信号：反了就是京东改版。
+        # 单看"rows == 0"区分不出「没货」和「字段改了」—— 有了这个布尔量，
+        # 下一次改版在日志里一眼可见。
+        stats["found"] = bool(items)
     if not items:
         return []
+
+    if stats is not None:
+        stats["items"] = len(items)
 
     rows: list[dict] = []
     for item in items:
@@ -162,6 +177,12 @@ def parse_search_payload(payload: object) -> list[dict]:
         title = _strip_tags(str(item.get("wareName") or "")).strip()
         price = _price_of(item)
         if not title or len(title) < 4 or price is None or price <= 0:
+            # 缺价格 vs 缺标题分开计数 —— 处置方式不同：
+            # 全缺价格 = 京东把价格字段挪走了（改版）；缺标题 = 少量脏数据。
+            if stats is not None:
+                stats["no_price" if price is None else "bad_title"] = (
+                    stats.get("no_price" if price is None else "bad_title", 0) + 1
+                )
             continue
         ware_id = str(item.get("wareId") or item.get("skuId") or "").strip()
         final = item.get("finalPrice")
@@ -283,7 +304,9 @@ class JdCollector(BaseCollector):
                 # run_browser_batch，绝不能被下面的 except 吞成"搜索失败"：
                 # 吞掉它就会变成"记一笔失败、继续拿下一个型号去撞"。
                 policy.navigate(page, url, self.code, timeout=self.page_timeout)
-            except policy.RateLimitError:
+            except (policy.RateLimitError, policy.AuthExpiredError):
+                # ⚠️ `AuthExpiredError` 必须一起上抛：它是"去重新登录"的信号，
+                #    被 `except Exception` 吞掉就退化成"记一笔失败、继续下一个"。
                 raise
             except Exception as exc:
                 # ⚠️ 「页面/浏览器已关闭」**不能**被吞成"搜索失败"。
@@ -309,9 +332,10 @@ class JdCollector(BaseCollector):
 
         # ---- 优先用接口数据；失败则回落 DOM ----
         rows: list[dict] = []
+        stats: dict = {}
         if captured.get("body"):
             try:
-                rows = parse_search_payload(json.loads(captured["body"]))
+                rows = parse_search_payload(json.loads(captured["body"]), stats)
             except Exception as exc:      # noqa: BLE001
                 logger.warning("京东接口解析失败，回落 DOM %s：%s", product.model, exc)
                 rows = []
@@ -321,8 +345,33 @@ class JdCollector(BaseCollector):
                         product.model, len(rows))
             return self._quotes_from_rows(rows, product, url)
 
+        # ---- 改版信号：接口**收到了载荷**却解析不出商品数组 ----
+        # 这是本项最有价值的观测：`rows == 0` 有三种成因（真没货 / 被拦 / 字段改了），
+        # 而"≥20KB 的载荷收到了、但形状匹配不上"把第三种单独指了出来。
+        # 没有它，京东改一次字段名，我们只会看到"数据变少了"，无从知道为什么。
+        if captured.get("body") and stats.get("found") is False:
+            note_stage("接口有载荷但无商品数组")
+            logger.warning(
+                "京东 %s 收到了 %d 字节的接口载荷，但**识别不出商品数组** —— "
+                "疑似京东改了字段结构，请检查 `_find_product_list` 的形状判据"
+                "（判据：数组里 ≥%d 个元素同时带 wareId 与 jdPrice）",
+                product.model, len(captured["body"]), _PRODUCT_MIN,
+            )
+        elif stats.get("items"):
+            note_stage("接口有货但不可用")
+            logger.warning(
+                "京东 %s 接口返回 %d 个商品，但全部不可用（缺价格 %d / 标题异常 %d）"
+                "—— 疑似京东改了字段名，请检查 `_price_of`",
+                product.model, stats["items"], stats.get("no_price", 0),
+                stats.get("bad_title", 0),
+            )
+
         note_stage("回落DOM")
-        return self._quotes_from_dom(page, product, url)
+        quotes = self._quotes_from_dom(page, product, url)
+        if not quotes:
+            # 两条路都是 0 条 —— 先问平台"是不是真的没有"，再决定算不算可疑
+            policy.raise_if_empty(page, self.code)
+        return quotes
 
     def _quotes_from_rows(self, rows: list[dict], product, fallback_url: str) -> list[Quote]:
         """接口 rows → Quote（与闲鱼 `_quotes_from_rows` 同一套字段口径）。"""
@@ -356,17 +405,47 @@ class JdCollector(BaseCollector):
         return quotes
 
     def _quotes_from_dom(self, page, product, url: str) -> list[Quote]:
-        """DOM 兜底：接口失效时仍能取到数（只依赖一个稳定容器类名）。"""
-        try:
-            cards = page.locator(CARD_SELECTOR)
-            count = cards.count()
-        except Exception as exc:
-            # ⚠️ 和 navigate 同理：页面/浏览器已关闭不能被吞成"卡片定位失败"。
-            # 吞掉会累加 empty_streak，连续 3 次就误判为限流 —— 方向指反。
-            if page_dead(exc):
-                raise
-            logger.warning("京东卡片定位失败 %s：%s", product.model, exc)
+        """DOM 兜底：接口失效时仍能取到数。
+
+        选择器走**回退链**并取命中数最多的那个 —— 依据
+        `jdcrawler/spiders/jdproduct.py:16-19`（主选择器 + 回退链）与 `:436-441`
+        （把 `data-sku` 缺失率当**页面改版探针**）。
+
+        `div[data-sku]` 是京东商品卡上**不带构建哈希**的稳定属性，而且能直接
+        推出商品页 URL；但它在当前 React 版页面上不一定还在，所以**不写死**，
+        两个都试、谁多信谁。命中数与"缺 data-sku 的卡片数"都进分段计数。
+        """
+        cards = None
+        count = 0
+        chosen = ""
+        for selector in (CARD_SELECTOR, "div[data-sku]"):
+            try:
+                loc = page.locator(selector)
+                n = loc.count()
+            except Exception as exc:
+                # ⚠️ 和 navigate 同理：页面/浏览器已关闭不能被吞成"卡片定位失败"。
+                # 吞掉会累加 empty_streak，连续 3 次就误判为限流 —— 方向指反。
+                if page_dead(exc):
+                    raise
+                continue
+            if n > count:
+                cards, count, chosen = loc, n, selector
+        if cards is None:
             return []
+
+        # 改版探针：有卡片但大量缺 data-sku → 京东换卡片结构了。
+        # 从分段计数里能立刻看出来，而不是等某天数据突然变少才去查。
+        try:
+            with_sku = page.locator("div[data-sku]").count()
+        except Exception:  # noqa: BLE001
+            with_sku = 0
+        note_stage(f"DOM选择器{'(主)' if chosen == CARD_SELECTOR else '(data-sku)'}")
+        if count and with_sku < count:
+            note_stage("缺data-sku", count - with_sku)
+            logger.warning(
+                "京东 %s %d 张卡片缺 data-sku 属性（可能页面结构变化，请检查选择器）",
+                product.model, count - with_sku,
+            )
 
         quotes: list[Quote] = []
         for i in range(count):

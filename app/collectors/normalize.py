@@ -179,6 +179,55 @@ _IDENTITY_ONLY = (
 )
 
 
+def parse_publish_time(value: object) -> str:
+    """把各种形态的"发布时间"归一成 `YYYY-MM-DD HH:MM:SS`；无法判定返回 ""。
+
+    为什么需要（2026-10-02）：闲鱼搜索接口的 `publishTime` 是**毫秒时间戳**
+    （`ai-goofish-monitor/src/parsers.py:59`），而 DOM 兜底路径拿到的是
+    「37分钟前发布」这类**相对文案**。两种形态混着入库，下游（按天分组、
+    算"上架多久了"）就得各自猜单位 —— 正是本项目被咬过多次的那类问题
+    （口径不统一）。
+
+    接受的形态：
+      · 毫秒时间戳（13 位）      → 除以 1000
+      · 秒时间戳（10 位）        → 原样
+      · 已经是 ISO / 带日期字符串 → 取前 19 字符
+      · 相对文案（「37分钟前」）  → 返回 ""（**不猜**，猜出来的时间会污染统计）
+
+    ⚠️ 刻意**不**解析「3天前」这类相对文案：那需要一个"当前时刻"基准，
+    而基准错一点整批数据就偏了。宁可留空，也不要假精确。
+    """
+    if value is None:
+        return ""
+
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        # 13 位是毫秒、10 位是秒。用数量级判，不用长度判 —— 长度会被人为补零骗到。
+        if ts > 1e11:
+            ts /= 1000.0
+        try:
+            from datetime import datetime
+
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, OSError, OverflowError):
+            return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    # 纯数字字符串（接口有时把时间戳序列化成字符串）
+    if text.isdigit():
+        return parse_publish_time(int(text))
+
+    # 已经是日期形态：只取到秒，丢掉时区/毫秒尾巴，保证同一列格式一致
+    if len(text) >= 10 and text[:4].isdigit() and text[4] == "-":
+        return text[:19].replace("T", " ")
+
+    # 相对文案（「37分钟前发布」）→ 留空，见上面的说明
+    return ""
+
+
 def normalize_url(url: object) -> str:
     """把商品链接归一到「可点开、且同一商品唯一」的形态。
 

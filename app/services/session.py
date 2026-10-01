@@ -1676,6 +1676,19 @@ def apply_session(context, site: str) -> int:
     注入会话 Cookie 后，闲鱼恢复为 5356 字符的正常搜索结果。
 
     所以：登录检查用文件判"有没有"，真正发请求前必须把文件注入浏览器。
+
+    关于"注入后要不要 reload"（2026-10-02 核对同类项目后的结论）
+    ------------------------------------------------------------
+    `Goodnameisfordoggy/.../logInWithCookies.py:104-124` 的做法是
+    `add_cookies()` 之后必须 `page.reload()`。**我们不需要**，而且不能照抄：
+    他们的目标是**已经打开的页面**（`page` 在注入之前就存在了），
+    不 reload 就还是旧的 Cookie 上下文；
+    而我们这里 `browser_worker._open_page()` 的顺序是
+    `apply_session(context, site)` → **然后**才 `context.new_page()` ——
+    新页面从诞生起就在带 Cookie 的 context 里，没有"旧上下文"可刷。
+    （盲目加一次 reload 只会让每次借页都白等一轮导航。）
+
+    这条留档是为了避免以后有人"对照参考项目补齐"时加一个无用的 reload。
     """
     state = load_session(site)
     if not state:

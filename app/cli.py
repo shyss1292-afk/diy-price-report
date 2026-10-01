@@ -303,6 +303,16 @@ def cmd_browser(args) -> int:
         return 0 if report.get("moved") else 1
 
     from .services.browser_worker import get_worker
+    from .services.pipeline import collect_round_running
+
+    # `--kill` / `--recycle` 会停掉**共享**浏览器实例 —— 采集期间执行
+    # 等于把正在跑的那一轮打断。只读动作（--status / --show / --migrate）不拦。
+    if (args.kill or args.recycle):
+        running, pid = collect_round_running()
+        if running:
+            print(f"   ⛔ 有采集轮次正在跑（pid {pid}），此刻 "
+                  f"{'--kill' if args.kill else '--recycle'} 会打断它。等这一轮结束再试。")
+            return 2
 
     worker = get_worker(reload_config=True)
 
@@ -400,6 +410,66 @@ def cmd_queue(args) -> int:
     if waiting:
         names = ", ".join(t.model or str(t.product_id) for t in waiting[:5])
         print(f"     待办前 5  : {names}")
+    return 0
+
+
+def cmd_login_check(args) -> int:
+    """登录态探针：**开跑前**判定某站点是否已登录。
+
+    与采集途中判定的分工：`policy.AuthExpiredError` 是"已经开始的一轮"
+    被发现后立刻中止；这里是**连一轮都不浪费**。
+
+    ⚠️ 每次探针都是一次真实请求。对已被风控标记的平台（当前京东），
+    这会算进"今天又打扰了它几次" —— 所以它默认只在手动调用时执行。
+    """
+    from .services import login_probe
+    from .services.pipeline import collect_round_running
+
+    # ⚠️ 采集期间**绝不能**碰共享浏览器。
+    #    `browser_worker` 的浏览器是进程间共享的（同一个 CDP 端口 + 同一个
+    #    profile），本命令结束时会 `stop()` —— 而 stop 会把**正在采集的那一轮**
+    #    的浏览器一起杀掉。实测 2026-10-02 07:38 就是这样打断了 07:32 那轮
+    #    （闲鱼第 9/15 个型号报 "Target page, context or browser has been closed"）。
+    running, pid = collect_round_running()
+    if running:
+        print("   ⛔ 有采集轮次正在跑（pid %d），本命令会重启共享浏览器、"
+              "把正在采集的页面杀掉。" % pid)
+        print("      等这一轮结束再试，或先看：python -m app.cli admin（管理页）")
+        return 2
+
+    sites = [args.site] if args.site else sorted(login_probe.PROBES)
+    print("   登录态探针（每个站点一次真实请求）")
+    print()
+
+    from .services.browser_worker import get_worker
+
+    # 站点 → 平台 code（探针只需要站点；采集器侧名称差异见 browser_site）
+    worker = get_worker()
+    bad = 0
+    try:
+        for site in sites:
+            if not login_probe.supported(site):
+                print(f"   ⏭  {site:<8} 不支持探针：{login_probe.UNSUPPORTED.get(site, '未配置')}")
+                continue
+            r = login_probe.probe_via_worker(worker, site)
+            mark = {True: "✅", False: "❌", None: "❓"}[r["logged_in"]]
+            text = {True: "已登录", False: "**未登录**", None: "无法判定"}[r["logged_in"]]
+            print(f"   {mark}  {site:<8} {text}  ({r['elapsed_ms']}ms)")
+            print(f"         {r['reason']}")
+            if r.get("url"):
+                print(f"         落地：{r['url'][:100]}")
+            if r["logged_in"] is False:
+                bad += 1
+    finally:
+        worker.stop()
+
+    print()
+    if bad:
+        print(f"   ⚠️ {bad} 个站点未登录，请重新扫码：")
+        for site in sites:
+            print(f"        python -m app.cli login --site {site}")
+    else:
+        print("   ✅ 没有发现登录态问题")
     return 0
 
 
@@ -657,6 +727,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_browser.add_argument("--kill", action="store_true", help="彻底关闭并等内存释放")
     p_browser.add_argument("--migrate", action="store_true", help="把旧 profile 迁到项目内 runtime/")
     p_browser.set_defaults(func=cmd_browser)
+
+    p_lc = sub.add_parser("login-check", help="登录态探针：开跑前判定是否已登录")
+    p_lc.add_argument("--site", type=str, default=None,
+                      help="站点（jd / goofish / pdd）；不传则探全部")
+    p_lc.set_defaults(func=cmd_login_check)
 
     p_breaker = sub.add_parser("breaker", help="熔断冷却：查看各平台策略与冷却状态")
     p_breaker.add_argument("--clear", action="store_true", help="解除冷却（默认全部）")

@@ -23,6 +23,7 @@ from ..seed_data import (
 from ..services import coverage as coverage_svc
 from ..services import report as report_svc
 from ..services import trend as trend_svc
+from ..services import listing_history
 from ..services.pipeline import run_pipeline
 
 router = APIRouter(prefix="/api")
@@ -593,6 +594,72 @@ def admin_backfill(payload: dict | None = None) -> dict:
     days = int(payload.get("days") or 180)
     days = max(2, min(days, 730))
     return _start_collect(payload.get("sources") or None, days, "backfill")
+
+
+# ======================================================================
+# 单品（挂牌）信号 —— 降价榜 / 新上架 / 单品历史
+# ======================================================================
+#
+# 这三条读的是 `listing_snapshots`（粒度 = 平台 × 挂牌 × 日期），
+# 而其余所有报表读的是 `price_daily`（粒度 = 型号 × 平台 × 日期）。
+#
+# 为什么两者都得有：市场均价会把**单条挂牌的降价抹平** ——
+# 一个卖家把 3500 的卡砍到 2800，撼动不了 400 条样本的中位数，
+# 但二手捡漏恰恰就发生在这一条上。所以这套报表回答的是
+# 「哪条具体商品在降」「哪条是新挂出来的」，而不是「这个型号便宜了没」。
+
+
+@router.get("/listings/drops")
+def listing_drops(
+    days: int = Query(7, ge=1, le=180),
+    min_drop_pct: float = Query(3.0, ge=0.0, le=90.0),
+    limit: int = Query(30, ge=1, le=200),
+    category: str | None = Query(None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """降价榜 —— 与**该挂牌自己上一次**被看到的价格比。
+
+    `min_drop_pct` 默认 3%：低于它的波动多是改价凑整/包邮折算，噪声大于信号。
+    """
+    rows = listing_history.listing_drops(
+        db, days=days, min_drop_pct=min_drop_pct, limit=limit, category=category
+    )
+    return {
+        "days": days,
+        "min_drop_pct": min_drop_pct,
+        "category": category,
+        "count": len(rows),
+        "items": rows,
+    }
+
+
+@router.get("/listings/new")
+def listing_new(
+    days: int = Query(3, ge=1, le=60),
+    limit: int = Query(30, ge=1, le=200),
+    category: str | None = Query(None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """新上架 —— 我们**第一次见到**它、且在最近 N 天内。
+
+    注意与 `publish_time` 的区别：那是平台口径的发布时间（卖家可能把挂了很久的
+    商品重新推送），这里是**我们自己的观测口径**。两个值都返回，供人自行判断。
+    """
+    rows = listing_history.newest_listings(db, days=days, limit=limit, category=category)
+    return {"days": days, "category": category, "count": len(rows), "items": rows}
+
+
+@router.get("/listings/{platform_code}/{item_id}/history")
+def listing_history_of(
+    platform_code: str,
+    item_id: str,
+    days: int = Query(180, ge=1, le=730),
+    db: Session = Depends(get_db),
+) -> dict:
+    """单条挂牌的价格历史（按天）。"""
+    return listing_history.build_listing_history(
+        db, platform_code=platform_code, item_id=item_id, days=days
+    )
 
 
 @router.get("/health")

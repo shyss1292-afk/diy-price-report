@@ -62,6 +62,7 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import os
 import threading
@@ -170,6 +171,31 @@ _DEFAULT_SOFT_LADDER: tuple[float, ...] = (900.0, 7200.0, 14400.0)
 
 # 给日志/CLI 用的中文标签
 SEVERITY_LABEL: dict[str, str] = {"hard": "硬拦截", "soft": "软风控"}
+
+# 登录态失效的**原因特征**。用途只有一个：判断一条历史冷却记录是不是
+# "因为登录失效才被判熔断的" —— 如果是，而登录态文件随后被更新过
+# （= 人重新扫码了），那条冷却就该自动失效。
+#
+# ⚠️ 为什么要限定在 auth 原因上：如果对**所有**冷却都做"文件更新即解除"，
+#    那么一次无关的重新登录就会把一个真·风控冷却清掉，下一轮立刻又去撞墙。
+#    （2026-10 之前 PDD 的真实形态：跳 login.html → 熔断 1 天 → 到期重试
+#     → 还是 login.html → 冷更久，无限循环。修完 auth 通道后这类记录不再产生，
+#     这里处理的是历史遗留。）
+_AUTH_MARKERS: tuple[str, ...] = (
+    "login", "passport", "needlogin", "登录",
+    "fail_sys_session_expired", "fail_sys_token_expired",
+    "fail_sys_token_exoired", "fail_sys_token_empty", "令牌过期",
+    "error_code=40001",
+)
+
+# 平台 code → 登录态文件对应的 site 名。闲鱼是唯一不同名的（会话文件叫 goofish）。
+# `scripts/selftest.py` 有一条断言钉住"这张表必须与采集器的 browser_site 一致"，
+# 免得哪天改了 collector 而忘了改这里。
+_SESSION_SITE: dict[str, str] = {
+    "jd": "jd",
+    "pdd": "pdd",
+    "xianyu": "goofish",
+}
 
 _LOCK = threading.Lock()
 
@@ -312,27 +338,61 @@ def human_duration(seconds: float) -> str:
 
 # ------------------------------------------------------------------ 读写
 
+def _quarantine(reason: str) -> None:
+    """把损坏的状态文件**改名保留**，而不是静默丢弃。
+
+    依据 `ai-goofish-monitor/src/failure_guard.py:119-133`：文件损坏时重命名成
+    `*.corrupt.<ts>` 保留现场。理由：熔断状态决定了"这一轮要不要去撞平台"，
+    它损坏本身就是一个需要排查的事件 —— 静默忽略只会让人永远不知道发生过什么。
+    """
+    try:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = BREAKER_FILE.with_name(f"{BREAKER_FILE.name}.corrupt.{stamp}")
+        BREAKER_FILE.replace(target)
+        logger.warning("熔断状态文件%s，已保留现场：%s", reason, target)
+    except OSError as exc:
+        logger.warning("熔断状态文件%s（现场保留失败：%s）", reason, str(exc)[:80])
+
+
 def _load() -> dict:
     if not BREAKER_FILE.exists():
-        return {"version": 1, "sources": {}}
+        return {"version": 1, "sources": {}, "auth": {}}
+    raw: object
     try:
         raw = json.loads(BREAKER_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        # 文件损坏时**当成没有冷却**，而不是让采集全部停摆
-        logger.warning("熔断状态文件损坏，忽略：%s", BREAKER_FILE)
-        return {"version": 1, "sources": {}}
+    except ValueError:
+        # 内容不是合法 JSON —— 保留现场再当成"没有冷却"（采集不该停摆）
+        _quarantine("损坏（非法 JSON）")
+        return {"version": 1, "sources": {}, "auth": {}}
+    except OSError as exc:
+        # 读不到（权限/占用）是**暂时性**问题，不该把文件搬走
+        logger.warning("熔断状态文件读取失败，本次当作无冷却：%s", str(exc)[:120])
+        return {"version": 1, "sources": {}, "auth": {}}
     if not isinstance(raw, dict):
-        return {"version": 1, "sources": {}}
-    raw.setdefault("sources", {})
+        _quarantine("结构异常（顶层不是对象）")
+        return {"version": 1, "sources": {}, "auth": {}}
+    if not isinstance(raw.get("sources"), dict):
+        raw["sources"] = {}
+    if not isinstance(raw.get("auth"), dict):
+        raw["auth"] = {}
+    raw.setdefault("version", 1)
     return raw
 
 
 def _save(data: dict) -> None:
-    """原子写：先写临时文件再 replace，避免读到半截 JSON。"""
+    """原子写：临时文件 → flush → fsync → os.replace。
+
+    `fsync` 不是多余的：熔断状态决定"下一轮要不要去撞平台"，它丢失的代价是
+    **多撞一次墙**。而 `write_text` + `replace` 在断电/被杀进程时可能只落盘文件名
+    而没有数据。依据 `ai-goofish-monitor/src/failure_guard.py:136-143`。
+    """
     try:
         BREAKER_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = BREAKER_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, ensure_ascii=False, indent=1))
+            fh.flush()
+            os.fsync(fh.fileno())
         tmp.replace(BREAKER_FILE)
     except OSError as exc:
         # 写不进去只影响"下次进程能否看到冷却"，不该让本轮采集崩掉
@@ -391,6 +451,8 @@ def trip(
             "reason": (reason or "")[:200],
             "severity": sev,
             "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # 供「人工干预」判定用（见 human_intervened）—— 文本时间不好比大小
+            "at_ts": time.time(),
             "trips": consecutive,
         }
         _save(data)
@@ -428,6 +490,9 @@ def record_success(source: str, verified: bool = False) -> bool:
     """
     with _LOCK:
         data = _load()
+        # 采到数据 = 登录态是好的 → 顺带清掉"需要重新登录"的标记
+        if data.get("auth", {}).pop(source, None) is not None:
+            _save(data)
         entry = data["sources"].get(source)
         if not entry:
             return False
@@ -452,6 +517,130 @@ def record_success(source: str, verified: bool = False) -> bool:
         data["sources"][source] = entry
         _save(data)
     return True
+
+
+def _session_file(source: str):
+    """该平台的登录态文件路径（不存在则 None）。"""
+    site = _SESSION_SITE.get(source)
+    if not site:
+        return None
+    try:
+        from .session import session_path
+
+        path = session_path(site)
+    except Exception:  # noqa: BLE001 —— 定位不到就不做该判定，绝不抛
+        return None
+    try:
+        return path if path.exists() else None
+    except OSError:
+        return None
+
+
+def human_intervened(source: str) -> bool:
+    """登录态文件是否比熔断记录更新 —— 即"人刚重新登录过"。
+
+    依据 `ai-goofish-monitor/src/failure_guard.py:70-88,247-261`：把登录态文件的
+    mtime 变新当作"人来改过了"的信号，自动解除暂停（`reason="cookie_updated"`）。
+
+    ⚠️ 必须用**我们自己的 session 文件**，不能用 Chrome profile 目录 ——
+    后者每次采集都在写，mtime 永远是最新的，判定会恒为真。
+
+    ⚠️ 只对**登录失效类**的冷却生效（见 `_AUTH_MARKERS`）：如果对所有冷却都
+    "文件更新即解除"，一次无关的重新登录就会把真·风控冷却清掉，下一轮立刻
+    又去撞墙 —— 那正是我们花大力气修掉的形态。
+    """
+    entry = entry_of(source)
+    if not entry:
+        return False
+    reason = str(entry.get("reason") or "").lower()
+    if not any(m in reason for m in _AUTH_MARKERS):
+        return False
+
+    at = float(entry.get("at_ts") or 0.0)
+    if at <= 0:
+        text = str(entry.get("at") or "")
+        try:
+            at = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            return False
+
+    path = _session_file(source)
+    if path is None:
+        return False
+    try:
+        # +1 秒容差：同一秒内"熔断后立刻登录"不该被判成人来过了
+        return path.stat().st_mtime > at + 1.0
+    except OSError:
+        return False
+
+
+def _release_if_human_intervened(source: str, label: str = "") -> bool:
+    """人工干预过就先解除冷却（返回是否解除了）。"""
+    if not human_intervened(source):
+        return False
+    entry = entry_of(source)
+    logger.info(
+        "%s 的登录态文件比熔断记录更新（人在 %s 之后重新登录过）→ "
+        "自动解除该条冷却（原为 %s，原因：%s）",
+        label or source,
+        entry.get("at") or "?",
+        entry.get("cooldown_text") or human_duration(entry.get("seconds", 0)),
+        entry.get("reason") or "未记录",
+    )
+    clear(source)
+    return True
+
+
+def note_auth_expired(source: str, reason: str = "", label: str = "") -> dict:
+    """登记「这个源需要重新登录」—— **不**进退避阶梯。
+
+    为什么不复用 trip：退避是"别再去撞平台"的机制，而登录失效时我们撞的根本
+    不是风控，是自己没登录。把登录失效率记进阶梯，表现就是"某源冷了几小时，
+    其实只是没人去扫码"（PDD 2026-10 之前的真实形态）。
+
+    它只做两件可观测的事：写一条带时间戳的记录（给 CLI / 前置检查看），
+    以及打一条**醒目的**告警 —— 这件事需要人，日志必须显眼。
+    """
+    with _LOCK:
+        data = _load()
+        data["auth"][source] = {
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "at_ts": time.time(),
+            "reason": (reason or "")[:200],
+            "label": label or source,
+        }
+        _save(data)
+    logger.warning("=" * 68)
+    logger.warning(
+        "%s 登录态失效：%s", label or source, (reason or "未记录")[:120]
+    )
+    logger.warning(
+        "这不是风控 —— **不登记退避冷却**，也不会自动恢复。"
+        "请重新扫码：python -m app.cli login --site %s",
+        _SESSION_SITE.get(source, source),
+    )
+    logger.warning("=" * 68)
+    return data["auth"][source]
+
+
+def auth_expired_sources() -> dict[str, dict]:
+    """当前被标记为"需要重新登录"的源。"""
+    return dict(_load().get("auth") or {})
+
+
+def clear_auth_expired(source: str | None = None) -> int:
+    """清除登录失效标记（默认全部），返回清除条数。"""
+    with _LOCK:
+        data = _load()
+        auth = data.get("auth") or {}
+        if source is None:
+            n = len(auth)
+            data["auth"] = {}
+        else:
+            n = 1 if auth.pop(source, None) is not None else 0
+        if n:
+            _save(data)
+    return n
 
 
 def consecutive_trips(source: str) -> int:
@@ -487,13 +676,20 @@ def entry_of(source: str) -> dict:
 
 
 def clear(source: str | None = None) -> int:
-    """解除冷却。`source=None` 时清空全部，返回清掉的条数。
+    """解除冷却**与登录失效标记**。`source=None` 时清空全部，返回清掉的条数。
 
     顺带把**连续熔断计数**一起清掉 —— 记录整条被移除，下次熔断从阶梯第 1 级
     （默认 30 分钟）重新开始。人工判断"风控已经解除"时用它。
+
+    登录失效标记也一起清是有意的：CLI 上 `breaker --clear` 的语义就是
+    "我要让它恢复调度"，若"仍需重新登录"的标记留着，下一轮还是会走 auth 分支。
     """
     with _LOCK:
         data = _load()
+        if source is None:
+            data["auth"] = {}
+        else:
+            (data.get("auth") or {}).pop(source, None)
         if source is None:
             n = len(data["sources"])
             data["sources"] = {}
@@ -527,14 +723,22 @@ def snapshot() -> dict:
 def active_summary() -> str:
     """一行式冷却摘要（给日志用），没有冷却返回空串。"""
     snap = snapshot()
-    if not snap:
-        return ""
-    return " · ".join(
-        f"{code} 连续第 {v['trips']} 次"
-        f"（{SEVERITY_LABEL.get(v['severity'], v['severity'])}），"
-        f"还剩 {v['remaining_text']}（{v['reason'] or '限流'}）"
-        for code, v in snap.items()
-    )
+    auth = auth_expired_sources()
+    parts: list[str] = []
+    if snap:
+        parts.append(" · ".join(
+            f"{code} 连续第 {v['trips']} 次"
+            f"（{SEVERITY_LABEL.get(v['severity'], v['severity'])}），"
+            f"还剩 {v['remaining_text']}（{v['reason'] or '限流'}）"
+            for code, v in snap.items()
+        ))
+    if auth:
+        parts.append(" · ".join(
+            f"{v.get('label') or code} **需要重新登录**（{v.get('at')}，"
+            f"{v.get('reason') or '未记录'}）"
+            for code, v in auth.items()
+        ))
+    return " ｜ ".join(parts)
 
 
 def fast_fail(source: str, label: str = "") -> tuple[bool, float]:
@@ -554,6 +758,10 @@ def fast_fail(source: str, label: str = "") -> tuple[bool, float]:
     看起来像 bug，实际是它在退避期内。
     """
     if disabled():
+        return True, 0.0
+
+    # 人刚重新登录过 → 这条冷却的前提已经不成立，自动解除
+    if _release_if_human_intervened(source, label):
         return True, 0.0
 
     remaining = cooldown_remaining(source)
@@ -596,6 +804,9 @@ def wait_until_ready(
     "我们等着"而提前解除。跳过更划算，下一轮再来。
     """
     if disabled():
+        return True, 0.0
+
+    if _release_if_human_intervened(source, label):
         return True, 0.0
 
     remaining = cooldown_remaining(source)

@@ -146,6 +146,69 @@ class PriceDaily(Base):
     )
 
 
+class ListingSnapshot(Base):
+    """一条**具体挂牌**在某一天的价格快照。
+
+    ⚠️ 与 `Listing` 的粒度区别（这是本表存在的全部理由）：
+
+        Listing          行 = (型号, 平台, 采集批次)  —— "某型号今天有哪些报价"
+        ListingSnapshot  行 = (平台, 挂牌 item_id, 日期) —— "这条商品我第几次见到"
+
+    有了它才算得出：
+      · 这条挂牌**第一次见到**是哪天（= 新上架，捡漏的黄金窗口）
+      · 它**降过价没有**（相对自己上一次被看到的价格）
+      · 我见过它几次（挂了很久还卖不掉 = 可能可以砍价）
+
+    为什么不能用 `listings` 表代替：那里每次采集都会插入新行、且按批次清理，
+    没有"同一商品跨天追踪"的身份（`url` 是商品页链接，但商品身份需要
+    `item_id`/`ware_id` 这个**平台原生 id**，而 listings 不存它）。
+
+    目前只有闲鱼（`item_id`）与京东（`ware_id`）能提供商品级身份；
+    拼多多还没有，所以那张表暂时只覆盖两个平台 —— 这不是缺陷，是如实反映
+    能力边界（拼多多的搜索响应是加密的，拿不到 goods_id 级身份）。
+    """
+
+    __tablename__ = "listing_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    platform_id: Mapped[int] = mapped_column(
+        ForeignKey("platforms.id", ondelete="CASCADE"), index=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), index=True
+    )
+    # 平台原生的商品 id（闲鱼 item_id / 京东 wareId）。**去重与跨天追踪的身份**。
+    item_id: Mapped[str] = mapped_column(String(64), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    batch: Mapped[str] = mapped_column(String(16), default="")
+    price: Mapped[float] = mapped_column(Float)
+    # 原价（划掉的那个）—— 有它才算得出"挂牌自己标称降了多少"。
+    # 注意与 `price` 的区别：这是**卖家自己标**的原价，不是我们的历史价。
+    ori_price: Mapped[float] = mapped_column(Float, nullable=True)
+    title_raw: Mapped[str] = mapped_column(Text, default="")
+    seller: Mapped[str] = mapped_column(String(128), default="")
+    area: Mapped[str] = mapped_column(String(64), default="")
+    condition: Mapped[str] = mapped_column(String(16), default="")
+    url: Mapped[str] = mapped_column(Text, default="")
+    # 接口给的发布时间（已归一成 ISO）。它是"新上架"判定的**平台口径**，
+    # 与"我们第一次见到它"（first_date，我们的口径）是两件事，都要留。
+    publish_time: Mapped[str] = mapped_column(String(32), default="")
+    want_num: Mapped[int] = mapped_column(Integer, default=0)
+    tags: Mapped[str] = mapped_column(String(128), default="")
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    __table_args__ = (
+        # 同一天同一挂牌只留一条 —— 重跑/多批次走 upsert 覆盖，而不是堆行
+        UniqueConstraint(
+            "platform_id", "item_id", "trade_date",
+            name="uq_snapshot_platform_item_date",
+        ),
+        Index("ix_snapshot_item_date", "platform_id", "item_id", "trade_date"),
+        Index("ix_snapshot_product_date", "product_id", "trade_date"),
+    )
+
+
 class CrawlLog(Base):
     """采集任务执行日志。"""
 

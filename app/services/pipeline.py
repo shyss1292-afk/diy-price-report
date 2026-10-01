@@ -36,6 +36,7 @@ from ..config import BACKFILL_DAYS
 from ..db import init_db, session_scope
 from ..models import CrawlLog, Listing, Platform, PriceDaily, Product
 from .aggregate import refresh_daily
+from .listing_history import record_snapshots
 from .bootstrap import bootstrap
 from .clean import check as clean_check
 from . import healthcheck
@@ -55,6 +56,41 @@ def _day_list(day: date, backfill_days: int) -> list[date]:
 # 采集的**硬性墙钟上限**（秒）。正常一轮 9~10 分钟（15 个闲鱼型号约 8 分钟），
 # 35 分钟足够宽裕，同时低于单实例锁的陈旧阈值（40 分钟）。
 _DEFAULT_WALL_CLOCK_LIMIT = 2100.0
+
+
+def collect_round_running() -> tuple[bool, int]:
+    """当前是否有采集轮次正在跑 → `(是否在跑, pid)`。
+
+    为什么要它：`browser_worker` 的浏览器是**进程间共享**的（同一个 CDP 端口
+    + 同一个 profile）。所以任何"起个 worker、用完 stop()"的 CLI 命令，
+    都会把**正在采集的那一轮**的浏览器一起杀掉 ——
+    实测 2026-10-02 07:38 就是这样打断了 07:32 那轮。
+
+    判定方式：读 `data/.collect.lock/pid`（由 `scripts/collect_scheduled.sh`
+    在进入临界区时写下），再用 `os.kill(pid, 0)` **只探活、不发信号**
+    （0 号信号是"检查进程是否存在"，不会影响目标进程）。
+
+    ⚠️ 不用"锁目录是否存在"当判据：脚本异常退出会留下陈旧目录，
+    那种情况下进程早没了，不该继续拦人。
+    """
+    import os as _os
+
+    from ..config import DATA_DIR as _DATA
+
+    lock = _DATA / ".collect.lock"
+    if not lock.is_dir():
+        return False, 0
+    try:
+        pid = int((lock / "pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False, 0
+    if pid <= 0:
+        return False, 0
+    try:
+        _os.kill(pid, 0)
+    except OSError:
+        return False, 0
+    return True, pid
 
 
 def wall_clock_limit() -> float:
@@ -331,6 +367,61 @@ def zero_yield_reason(matched: int, unmatched: int, filtered: int) -> str:
     return "本次采集 0 条（疑似被限流或页面结构变化）"
 
 
+def _snapshot_row(
+    quote,
+    product_id: int,
+    platform,
+    day,
+    captured,
+    batch_id: str,
+    collector_code: str,
+) -> dict | None:
+    """把一条 Quote 转成单品快照行；**拿不到平台原生商品 id 就返回 None**。
+
+    为什么以"有没有商品 id"为门槛：快照表的全部价值就是**跨天追踪同一个挂牌**，
+    而没有 `item_id` 就只能退化成"(平台, 标题, 价格)"这种会随卖家改标题漂移的键 ——
+    那样写进去只能得到噪声（同一件商品每天算一条新记录）。
+    宁可少写，也不写进去污染。
+
+    目前能提供 id 的：闲鱼（`item_id`）、京东（`ware_id`）。
+    拼多多还没有 —— 它的搜索响应是加密的，拿不到 goods_id 级身份。
+    """
+    extra = getattr(quote, "extra", None) or {}
+    item_id = str(extra.get("item_id") or extra.get("ware_id") or "").strip()
+    if not item_id:
+        return None
+
+    ori = extra.get("ori_price")
+    try:
+        ori_price = float(ori) if ori not in (None, "") else None
+    except (TypeError, ValueError):
+        ori_price = None
+
+    tags = extra.get("tags") or []
+    if isinstance(tags, (list, tuple)):
+        tags = ",".join(str(t) for t in tags)
+
+    return {
+        "platform_id": platform.id,
+        "product_id": product_id,
+        "item_id": item_id[:64],
+        "trade_date": day,
+        "captured_at": captured,
+        "batch": batch_id,
+        "price": float(quote.price),
+        "ori_price": ori_price,
+        "title_raw": (quote.title_raw or "")[:400],
+        "seller": (getattr(quote, "seller", "") or "")[:128],
+        "area": str(extra.get("area") or "")[:64],
+        "condition": (getattr(quote, "condition", "") or "")[:16],
+        "url": (getattr(quote, "url", "") or "")[:500],
+        "publish_time": str(extra.get("publish_time") or "")[:32],
+        "want_num": int(extra.get("want_num") or 0),
+        "tags": str(tags)[:128],
+        "is_synthetic": collector_code == "mock",
+    }
+
+
 def run_pipeline(
     day: date | None = None,
     sources: list[str] | None = None,
@@ -540,6 +631,7 @@ def run_pipeline(
 
         today = date.today()
         all_rows: list[dict] = []
+        snap_rows: list[dict] = []      # 单品快照（需要平台原生商品 id）
 
         # ==============================================================
         # 阶段 2：采集 —— **全程不持有数据库事务**
@@ -592,6 +684,14 @@ def run_pipeline(
                                 "batch": batch_id,
                             }
                         )
+                        # ---- 单品快照（粒度：平台 × 挂牌 id × 日期）----
+                        # 与上面的 `listings` 是**两张不同粒度的表**：
+                        #   listings          型号级 —— 日低价/均价/涨跌幅都走它
+                        #   listing_snapshots 单品级 —— 「这条挂牌降过价没」走它
+                        # 市场均价会把单条降价抹平，而二手捡漏恰恰在那一条上。
+                        snap = _snapshot_row(q, pid, plat, d, captured, batch_id, collector.code)
+                        if snap is not None:
+                            snap_rows.append(snap)
 
                 all_rows.extend(rows)
                 notify("day_done", day=d.isoformat(), source=collector.code, items=len(all_rows))
@@ -632,6 +732,15 @@ def run_pipeline(
                 # 分块插入：单条 INSERT 的绑定参数个数有上限（见 _INSERT_CHUNK）
                 for i in range(0, len(all_rows), _INSERT_CHUNK):
                     session.execute(insert(Listing), all_rows[i : i + _INSERT_CHUNK])
+                # 单品快照走 upsert（同 (平台,挂牌,日期) 覆盖），
+                # 所以**不需要**像 listings 那样先按批次删除 —— 重跑只是更新。
+                if snap_rows:
+                    written = record_snapshots(session, snap_rows)
+                    logger.info(
+                        "[%s] 写入 %d 条单品快照（%d 个平台原生商品 id）",
+                        collector.code, written,
+                        len({(r["platform_id"], r["item_id"]) for r in snap_rows}),
+                    )
             items += len(all_rows)
         else:
             reason = zero_yield_reason(matched, unmatched, filtered)

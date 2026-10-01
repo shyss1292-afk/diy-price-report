@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>三平台同类项目调研（32 个仓库）· 2026-10-02</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#fff; --ink:#1c2430; --sub:#5b6b7f; --line:#e3e8ee;
+    --accent:#1f5fbf; --ok:#1a7f4b; --warn:#b3261e; --no:#6b7280; --hi:#fff8e6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:36px 20px 72px;background:var(--bg);color:var(--ink);
+       font:15px/1.75 -apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1060px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:.2px}
+  h2{font-size:20px;margin:44px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h2 .n{display:inline-block;min-width:34px;color:var(--accent);font-weight:700}
+  h3{font-size:16px;margin:26px 0 8px}
+  h4{font-size:15px;margin:0 0 8px}
+  p,li{color:#2b3644}
+  .meta{color:var(--sub);font-size:13px;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:22px}
+  .lead{background:var(--hi);border:1px solid #f0dca8;border-radius:10px;padding:14px 18px;margin:18px 0}
+  .lead b{color:#8a5a00}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:16px 0}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#eef2f7;font-weight:620;color:#243447}
+  code{background:#eef2f7;border-radius:4px;padding:1px 5px;font-size:12.5px;
+       font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .tag{display:inline-block;font-size:11.5px;font-weight:700;border-radius:99px;padding:1px 9px;margin-right:6px}
+  .t-ok{background:#e5f5ec;color:var(--ok)}
+  .t-no{background:#eef0f3;color:var(--no)}
+  .t-p0{background:#fdeceb;color:var(--warn)}
+  .t-q{background:#eaf1fd;color:var(--accent)}
+  .rec{border-left:4px solid var(--line);background:#fff;border-radius:0 8px 8px 0;
+       padding:14px 18px;margin:14px 0;border:1px solid var(--line)}
+  .rec.p0{border-left-color:var(--warn)}
+  .rec.p1{border-left-color:#d97706}
+  .rec.p2{border-left-color:var(--accent)}
+  .evidence{background:#f4f7fb;border-left:3px solid var(--accent);border-radius:0 6px 6px 0;
+            padding:10px 14px;margin:10px 0;font-size:13px;color:#243447}
+  .kv{margin:8px 0}
+  ul.tight{margin:6px 0;padding-left:20px}
+  ul.tight li{margin:3px 0}
+  .ok{color:var(--ok);font-weight:620}
+  .no{color:var(--warn);font-weight:620}
+  .sep{border:0;border-top:1px dashed var(--line);margin:40px 0}
+  footer{color:var(--sub);font-size:12.5px;margin-top:40px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>三平台同类项目调研 —— 32 个高星仓库</h1>
+<div class="meta">
+  <span>日期：2026-10-02</span>
+  <span>京东 12 · 拼多多 10 · 闲鱼 10（另核实 8 个未入选）</span>
+  <span>方式：codeload 整包下载 → 本地逐行读代码</span>
+</div>
+
+<div class="lead">
+  <b>为什么重做这一轮</b>
+  <p style="margin:8px 0 0">上一轮只挑了 7 个仓库（每平台 2~3 个），样本太窄。本轮按「每平台 10 个高星」重建样本，
+  并且<b>不再只看 README</b> —— 全部整包下载后逐行读代码。结果：<b>推翻了一条我们写进长期记忆的错误结论</b>
+  （「京东是服务端渲染、没有 JSON 可截获」），并据此落地了本轮最大的优化。</p>
+</div>
+
+<h2><span class="n">01</span>仓库清单</h2>
+
+<h3>京东（12 个，全部实读）</h3>
+<table>
+<thead><tr><th style="width:34%">仓库</th><th style="width:8%">★</th><th style="width:10%">语言</th><th style="width:12%">最后推送</th><th>价值</th></tr></thead>
+<tbody>
+<tr><td><code>tychxn/jd-assistant</code></td><td>5262</td><td>Python</td><td>2024-01</td><td>高（单文件 1415 行，登录/查价/下单全流程）</td></tr>
+<tr><td><code>zhuoyanzhe/AutoUpdateJdCookie</code></td><td>789</td><td>Python</td><td>2025-10</td><td>中（Cookie 续期思路）</td></tr>
+<tr><td><code>zhangjiancong/MarketSpider</code></td><td>435</td><td>Python</td><td>2025-05</td><td>中高（关键词→商品链接/价格/店铺）</td></tr>
+<tr><td><code>shaodahong/jd-happy</code></td><td>298</td><td>JS</td><td>2026-08</td><td>中</td></tr>
+<tr><td><code>Goodnameisfordoggy/JD-AutomatedTools</code></td><td>156</td><td>Python</td><td>2025-12</td><td>中（Cookie 登录管理 + 导出）</td></tr>
+<tr><td><code>yileicn/jd-assistantV2</code></td><td>122</td><td>Python</td><td>2024-01</td><td><span class="tag t-no">无</span>与 V1 仅差预约时间参数</td></tr>
+<tr><td><code>DAILtech/PriceDive</code></td><td>82</td><td>Python</td><td>2025-10</td><td><span class="tag t-no">无</span>取数是 <code>random.uniform</code> <b>模拟</b>数据</td></tr>
+<tr><td><code>wangdw495/ecommerce-price-analysis</code></td><td>45</td><td>Python</td><td>2025-09</td><td>低</td></tr>
+<tr><td><code>Kumagt/price-monitor</code></td><td>23</td><td>Python</td><td>2026-05</td><td>中（多数据源 Fallback 抽象）</td></tr>
+<tr><td><code>Mythologyli/jd-price-check</code></td><td>16</td><td>Python</td><td>2022-05</td><td>低</td></tr>
+<tr><td><code>CherryPainter/jd-product-crawler</code></td><td>3</td><td>Python</td><td>2026-07</td><td><b>最高</b>（含<b>真实响应样本</b>，是推翻旧结论的起点）</td></tr>
+<tr><td><code>muxue-yqy/…-ecommerce-monitor</code></td><td>3</td><td>Python</td><td>2026-08</td><td>中高（懒加载/重试/浏览器引擎分层）</td></tr>
+</tbody>
+</table>
+<p style="font-size:13px;color:var(--sub)">注：两条最有价值的证据来自 <b>3★</b> 的仓库 —— 星数不等于参考价值。</p>
+
+<h3>拼多多（10 个，候选池最脏，已剔除大量无关仓库）</h3>
+<table>
+<thead><tr><th style="width:34%">仓库</th><th style="width:8%">★</th><th style="width:10%">语言</th><th style="width:12%">最后推送</th><th>价值</th></tr></thead>
+<tbody>
+<tr><td><code>justmd5/pinduoduo-sdk</code></td><td>247</td><td>PHP</td><td>2025-06</td><td><span class="tag t-no">无</span>官方 SDK 路线已排除</td></tr>
+<tr><td><code>speng4096/PyLoom</code></td><td>246</td><td>Python</td><td>2019-04</td><td>中（错误标签 + 整体回滚）</td></tr>
+<tr><td><code>OFZFZS/scrapy-pinduoduo</code></td><td>237</td><td>Python</td><td>2018-09</td><td>高（<code>apiv3</code> 免签名端点线索）</td></tr>
+<tr><td><code>Northxw/Pinduoduo</code></td><td>216</td><td>JS</td><td>2019-04</td><td>中高（SSR <code>listID</code>/<code>flip</code> + 禁随机 UA）</td></tr>
+<tr><td><code>onetwo1/pinduoduo</code></td><td>161</td><td>Python</td><td>2019-04</td><td>高（类目端点 + <code>list_id</code> 构造）</td></tr>
+<tr><td><code>mf-yang/pdd-customer-service-sdk</code></td><td>50</td><td>Python</td><td>2025-11</td><td>低</td></tr>
+<tr><td><code>njmxye/pdd-reverse</code></td><td>23</td><td>JS</td><td>2024-08</td><td>中（批发站 + 设备指纹 cookie）</td></tr>
+<tr><td><code>Kumagt/price-monitor</code></td><td>23</td><td>Python</td><td>2026-05</td><td>中</td></tr>
+<tr><td><code>jynvch/pdd_spider</code></td><td>20</td><td>JS</td><td>2019-08</td><td><b>最高</b>（完整错误码表 + <code>__NEXT_DATA__</code>）</td></tr>
+<tr><td><code>1tgbh/pdd-parser</code></td><td>12</td><td>Python</td><td>2026-06</td><td><b>最高</b>（详情页接口<b>未加密</b>）</td></tr>
+</tbody>
+</table>
+
+<h3>闲鱼（10 个）</h3>
+<table>
+<thead><tr><th style="width:34%">仓库</th><th style="width:8%">★</th><th style="width:10%">语言</th><th style="width:12%">最后推送</th><th>价值</th></tr></thead>
+<tbody>
+<tr><td><code>Usagi-org/ai-goofish-monitor</code></td><td>14611</td><td>Python</td><td>2026-05</td><td>最高（Playwright 监控 + 分页/快照/商品历史）</td></tr>
+<tr><td><code>shaxiu/XianyuAutoAgent</code></td><td>9293</td><td>Python</td><td>2026-06</td><td>高（登录探针 <code>hasLogin.do</code>）</td></tr>
+<tr><td><code>zhinianboke/xianyu-auto-reply</code></td><td>7377</td><td>Python</td><td>2026-09</td><td>中高（连接保活/重连工程模式）</td></tr>
+<tr><td><code>GuDong2003/xianyu-auto-reply-fix</code></td><td>2700</td><td>Python</td><td>2026-08</td><td>中</td></tr>
+<tr><td><code>Christ9038/Ydisks-Xianyu-Helper</code></td><td>1656</td><td>Go</td><td>2026-09</td><td>中高（<code>silentHasLogin.do</code> 静默探针）</td></tr>
+<tr><td><code>cv-cat/XianYuApis</code></td><td>1474</td><td>JS</td><td>2026-08</td><td>高（闲鱼算法逆向 + <code>_m_h5_tk</code> 维护）</td></tr>
+<tr><td><code>23Star/xianyu-super-butler</code></td><td>1099</td><td>Python</td><td>2026-10</td><td>中（自动滑块，我们不做）</td></tr>
+<tr><td><code>fancyboi999/goofish-cli</code></td><td>297</td><td>Python</td><td>2026-09</td><td><b>最高</b>（5 类错误分层，含"刷 cookie 救不了风控"）</td></tr>
+<tr><td><code>XIE7654/goofish_api</code></td><td>121</td><td>Python</td><td>2026-05</td><td>高（<code>searchFilter: publishDays</code> 时间窗）</td></tr>
+<tr><td><code>11273/goofish-client</code></td><td>68</td><td>TS</td><td>2026-07</td><td>中</td></tr>
+</tbody>
+</table>
+<p style="font-size:13px;color:var(--sub)">另核实未入选：<code>P1kaj1uu/ChattyPlay-Agent</code>(944，<b>仓库内零闲鱼代码</b>)、
+<code>IAMLZY2018/XianYuAssistant</code>(377)、<code>dameng2026/xianyu-pilot</code>(136)、
+<code>Kaguya233qwq/myfish</code>(106，签名靠 <code>.so</code> 且不支持 macOS)、<code>SEBV1/idlefish_monitor</code>(67)。</p>
+
+<h2><span class="n">02</span>本轮落地的优化（含实测数据）</h2>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">已落地</span>京东取数改为「响应截获」—— 并推翻了一条错误结论</h4>
+  <div class="body">
+    <div class="kv"><b>错误结论（已存在多日）：</b>MEMORY 与旧调研报告都写着「京东桌面搜索页是
+      <b>服务端渲染 HTML</b>，<b>没有 JSON 接口</b>可截获」，并据此把京东排除在「响应截获」优化之外。</div>
+    <div class="evidence">
+      <b>实测（4 次只读探针）</b><br>
+      ① 服务端 HTML 只有 <b>47,294 字符</b>，<code>data-sku</code> 出现 <b>0</b> 次、商品卡片 <b>0</b> 个
+        → <b>根本不是 SSR</b><br>
+      ② 商品数据在 <code>api.m.jd.com/api?appid=search-pc-java</code> 的<b>明文 JSON</b>：
+        商品数组 <b>242,386 字符</b>，含 <code>wareId</code> <b>30 个</b>（正好等于页面上 30 张卡片）<br>
+      ③ <b>口径逐条吻合</b>：技嘉 5070 卡片「¥ 7299 包邮」↔ <code>jdPrice: 7299.00</code>；
+        七彩虹「¥ 7399」↔ <code>jdPrice: 7399.00</code> ⇒ 不会造成口径断裂<br>
+      ④ 同一 appid 还会被调用若干次（AB 配置，约 7KB）→ 用<b>体积下限 20KB</b> 干净区分
+    </div>
+    <div class="evidence">
+      <b>真实采集实测</b><br>
+      <code>京东 Ryzen 5 8400F 命中搜索接口：30 条（含店铺/到手价/wareId）</code><br>
+      <code>京东 RTX 5050 8G   命中搜索接口：30 条（含店铺/到手价/wareId）</code><br>
+      <code>京东 采集结束：2 个型号 → 60 条报价，耗时 27.8s</code><br>
+      <code>京东 分段计数：接口命中 2 · 有结果型号 2</code> ← <b>不是「回落DOM」</b>
+    </div>
+    <div class="kv"><b>顺带拿到的东西：</b><code>wareId</code> 让我们可以自己拼
+      <code>https://item.jd.com/{wareId}.html</code> —— 京东<b>第一次有了商品级去重键</b>
+      （此前 <code>Quote.url</code> 是搜索页 URL，<code>link_key()</code> 返回空串，只能回落到
+      <code>(平台,标题,价格)</code>）。另有 <code>shopName</code>/<code>stock</code>/
+      <code>finalPrice</code>(到手价)/<code>oriPrice</code>/<code>wareExtend</code>(规格) 等 DOM 拿不到的字段。</div>
+  </div>
+</div>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">已落地</span>三处核验过的缺陷</h4>
+  <div class="body">
+    <ul class="tight">
+      <li><b>限流特征正文匹配漏 <code>lower()</code></b> —— URL 分支早就 <code>(page.url or "").lower()</code>，
+        正文分支一直是裸 <code>in</code>。后果：任何含<b>大写 ASCII</b> 的特征
+        （<code>RGV587_ERROR</code>、<code>FAIL_SYS_USER_VALIDATE</code>、<code>Error_Code</code>）
+        <b>静默永不命中</b> —— 不报错、不熔断，只是安静地失效。
+        改为两边都 lower，但日志片段仍取<b>原文</b>（可读性）。</li>
+      <li><b>京东 URL 特征补 <code>risk_handler</code></b> —— 同类项目里有，我们漏了。
+        它和 <code>busy.html</code> 同类，但 URL 里没有 <code>busy</code> 字样，旧特征抓不到。</li>
+      <li><b>闲鱼 <code>Quote.extra</code> 补 <code>item_id</code></b> ——
+        <code>parse_search_payload</code> 解析出来了，构造 Quote 时却被丢掉（只用来拼 URL）。
+        它是排查「同一商品为什么算了两次」的原始身份。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="kv" style="margin-top:14px">
+  <b>验证：</b>自检 575 → <b>595</b>；反向守卫 <b>54/54 全部拦住</b>（基线 595/595、还原 595/595，
+  0 未判定 0 未拦住），结论「全部守卫有效」；真实采集端到端通过；环境归零。
+</div>
+
+<h2><span class="n">03</span>排队中的发现（按 ROI 排序）</h2>
+
+<table>
+<thead><tr><th style="width:5%">#</th><th style="width:26%">项</th><th style="width:12%">平台</th><th style="width:10%">出处</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td colspan="5" style="background:#f4f7fb;font-weight:620">取数通道</td></tr>
+<tr><td>1</td><td>拼多多<b>详情页</b>明文接口</td><td>PDD</td><td><code>1tgbh/pdd-parser</code></td>
+    <td>搜索接口是加密态，但详情页与 <code>consult_goods_price</code> 是<b>未加密</b> JSON ——
+        可做「搜索页发现 → 详情页取准价」的第二通道。<b>需实测确认</b></td></tr>
+<tr><td>2</td><td>京东单品结构化通道（价格/库存/促销价）</td><td>JD</td><td><code>CherryPainter</code> 等</td>
+    <td>本轮已拿到搜索列表；单品级的<b>库存</b>与<b>促销价</b>仍需另调接口 —— 那是 DOM 永远拿不到的</td></tr>
+<tr><td>3</td><td>拼多多 <code>__NEXT_DATA__</code> SSR 内嵌数据</td><td>PDD</td><td><code>jynvch/pdd_spider</code></td>
+    <td>搜索页 HTML 里嵌了 <code>req_params</code>（含 <code>list_id</code>/<code>flip</code>），
+        比等 DOM 渲染更稳更全</td></tr>
+<tr><td colspan="5" style="background:#f4f7fb;font-weight:620">登录态与风控</td></tr>
+<tr><td>4</td><td><b>低成本登录探针</b></td><td>三平台</td><td><code>shaxiu/XianyuAutoAgent</code>、<code>Christ9038</code></td>
+    <td>闲鱼 <code>hasLogin.do</code> / <code>silentHasLogin.do</code> 约 2 秒判登录；
+        京东 <code>me-api.jd.com</code> 的 <code>retcode==1001</code>。把「跑完一轮才发现失效」
+        提前到「开跑前」，比现有 <code>probe.py</code> 便宜两个数量级</td></tr>
+<tr><td>5</td><td>错误<b>分层</b>（风控 / 登录 / 签名 / 未找到）</td><td>三平台</td><td><code>goofish-cli/core/mtop.py</code></td>
+    <td>他们分 5 类并明确「风控层刷 cookie 救不了」。我们只有单一 <code>RateLimitError</code>，
+        <code>healthcheck.py</code> 注释自己承认「熔断器会把它误当成限流」</td></tr>
+<tr><td>6</td><td>拼多多完整<b>错误码表</b></td><td>PDD</td><td><code>jynvch/pdd_spider</code></td>
+    <td><code>54001</code>=风控 / <code>40001</code>=登录失效 / <code>1101·40002</code>=软风控 /
+        <code>41001-41003</code>=<b>真无货</b>。必须写成<b>带键名</b>形式（<code>error_code=54001</code>）
+        —— 裸数字会被显卡型号撞上（我们刚修过 <code>RTXA400016G</code> 那次误熔断）</td></tr>
+<tr><td>7</td><td>「真无货 vs 被限流」用<b>空态元素</b>判定</td><td>JD</td><td>同类项目</td>
+    <td>把 <code>_search</code> 改三态，只有"什么都没有"才累加 <code>empty_streak</code>；
+        别再把无货型号当成被拦的燃料</td></tr>
+<tr><td>8</td><td>京东搜索前<b>首页预热</b></td><td>JD</td><td>同类项目</td>
+    <td>我们拼多多有首页预热、<b>京东没有</b>（<code>breaker.py</code> 注释自己在怀疑这点）</td></tr>
+<tr><td colspan="5" style="background:#f4f7fb;font-weight:620">数据质量与可观测性</td></tr>
+<tr><td>9</td><td>闲鱼<b>单品快照表</b>（按 <code>item_id</code>）</td><td>闲鱼</td><td><code>ai-goofish-monitor</code></td>
+    <td>算「首见/末见/观测次数/相对上次涨跌」——<b>「这条挂牌从 3200 降到 2900」现在算不出来</b>，
+        只有型号×平台×天的聚合序列</td></tr>
+<tr><td>10</td><td>闲鱼补字段：卖家昵称 / 原价 / 想要人数 / 标签</td><td>闲鱼</td><td><code>goofish-cli</code></td>
+    <td>接口里有、我们没取。同时修一个实证缺陷：<code>Quote.seller</code> 恒为占位符
+        「闲鱼卖家」（<code>parse_search_payload</code> 从不设该键）</td></tr>
+<tr><td>11</td><td><code>expect_response</code> 绑定「点击 ↔ 目标响应」</td><td>闲鱼</td><td><code>ai-goofish-monitor</code></td>
+    <td>用 <code>async with page.expect_response(...)</code> 包住点击，消除跨型号的<b>响应串味</b>；
+        替换我们现在「被动监听 + 固定 <code>page_wait_ms</code> 猜等待」</td></tr>
+<tr><td>12</td><td>失败<b>分类打标签</b> + 按标签回滚</td><td>三平台</td><td><code>speng4096/PyLoom</code></td>
+    <td>把 <code>task_queue</code>+<code>breaker</code> 从「平台级冷却」细化到「失败类型级」——
+        网络抖动不再被当成风控白冷却几小时</td></tr>
+<tr><td>13</td><td>只重试<b>网络</b>异常，不重试业务异常</td><td>PDD</td><td><code>Kumagt/price-monitor</code></td>
+    <td>别让所有异常退化成「空结果累加 <code>empty_streak</code>」</td></tr>
+<tr><td>14</td><td>失败路径也把刷新的 token/cookie <b>写回</b></td><td>闲鱼</td><td><code>goofish-cli</code></td>
+    <td>否则下一轮从更旧的状态起步</td></tr>
+<tr><td>15</td><td>京东卡片主选择器改 <code>div[data-sku]</code></td><td>JD</td><td>同类项目</td>
+    <td>拿到稳定商品身份键（本轮已由 <code>wareId</code> 解决，此项降级为兜底）</td></tr>
+</tbody>
+</table>
+
+<h2><span class="n">04</span>明确不采用（边界与已实测结论）</h2>
+
+<table>
+<thead><tr><th style="width:28%">项</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>代理池 / 换 IP</td><td>我们<b>带登录态</b>，换 IP = 风控眼里的「同一账号多 IP 高频访问」（账号盗用特征）</td></tr>
+<tr><td><b>多账号 / 号池</b></td><td>关键在<b>被拦的是谁</b>：请求频率已被排除（京东每轮只采 2 个型号仍被拦）；
+    同 IP 挂多账号 = <b>群控/养号特征</b>，是从「限流」升级到「封号」的最快路径</td></tr>
+<tr><td>官方开放平台 API</td><td><b>已实测否决</b>：京东联盟链路能通但<b>覆盖率 0</b>
+    （扫 30 频道 1211 条商品，显卡 0、CPU 0 —— 低佣金品类商家不参加推广）</td></tr>
+<tr><td>JS 逆向 + 补环境</td><td>产物带保质期；且我们「接住页面自己的响应」已经绕开了签名问题</td></tr>
+<tr><td>滑块轨迹脚本化</td><td>平台明确的安全控制，脚本化轨迹本身就是被检测特征
+    （<code>23Star/xianyu-super-butler</code> 做这个，我们不跟）</td></tr>
+<tr><td>隐藏自动化指纹补丁</td><td>我们<b>自己 Popen 启动普通 Chrome 再 CDP 连接</b>，本来就没有 Selenium 的注入特征；
+    加补丁等于主动断言「我在做自动化」</td></tr>
+<tr><td>第三方打码平台</td><td>把风控难题外包，账号风险不降反升</td></tr>
+<tr><td>第三方付费数据聚合 API</td><td><code>Kumagt/price-monitor</code> 的真实数据源是付费 CPS 聚合 ——
+    与"自建追踪"的目标不符，且引入外部依赖</td></tr>
+</tbody>
+</table>
+
+<h2><span class="n">05</span>方法学收获（比发现更值钱）</h2>
+
+<div class="rec p2">
+  <h4><span class="tag t-q">教训</span>星数 ≠ 参考价值；README ≠ 代码</h4>
+  <div class="body">
+    <ul class="tight">
+      <li>本轮<b>两条最有价值的证据</b>来自 <b>3★</b> 的仓库；而 9000+★ 的项目里有
+        <b>仓库内零闲鱼代码</b>的（<code>ChattyPlay-Agent</code>）。</li>
+      <li><code>DAILtech/PriceDive</code>(82★) 的 <code>fetch_price()</code> 是
+        <code>random.uniform</code> <b>模拟数据</b> —— 只看 README 会当成正经项目。</li>
+      <li>所以本轮强制要求：<b>只写"看了代码确认"的事实</b>，每条带 <code>文件:行号</code>；
+        无借鉴价值的如实写「无借鉴价值」，<b>不为凑数把垃圾项目写成有价值</b>。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="rec p0">
+  <h4><span class="tag t-p0">教训</span>「从未做过」不能只 grep 记忆文件 —— 必须查 git log</h4>
+  <div class="body">
+    <div class="kv">本轮我曾断言「官方开放平台 API 这条路线项目里从未评估过」，
+      并把它写进了长期记忆 —— <b>错的</b>。它早已实测否决，结论存在三处，
+      而我只查了 <code>MEMORY.md</code>（那里恰好一行都没有，因为当时只写进了提交信息）。</div>
+    <div class="kv"><b>结论：</b>说「从未做过 / 没评估过」之前，必须查遍
+      <b>MEMORY.md + 大日志 + git log 提交正文</b>三处；
+      并且<b>重要结论要从提交信息回写 MEMORY.md</b>，否则下一个人会从"没写"推出"没做"。</div>
+  </div>
+</div>
+
+<div class="rec p1">
+  <h4><span class="tag t-no">教训</span>先验证，再落盘</h4>
+  <div class="body">
+    <div class="kv">本轮补丁脚本把 <code>write_text()</code> 写在 <code>ast.parse()</code>
+      <b>之前</b> —— 语法检查报错时，坏内容已经落盘并被提交进版本库
+      （<code>reverse_check.py</code> 少了收尾的 <code>]</code>）。</div>
+    <div class="kv"><b>规则：</b>生成内容 → <b>先 <code>ast.parse</code> 验证</b> → 再写文件。</div>
+  </div>
+</div>
+
+<hr class="sep">
+
+<div class="card">
+  <h3 style="margin-top:0">一句话总结</h3>
+  <p>按每平台 10 个高星项目重建样本、<b>32 个仓库整包下载逐行读代码</b>之后，
+  最大的收获不是抄来一堆功能，而是<b>推翻了一条把京东排除在最佳优化之外的错误结论</b> ——
+  京东和闲鱼其实是同一套模式，现在也走响应截获了，还首次拿到了商品级去重键。</p>
+  <p style="margin-bottom:0">另外 15 条发现已按 ROI 排好队，每一条都带
+  <code>文件:行号</code> 级证据，可以逐条验证后再动手。</p>
+</div>
+
+<footer>
+  报告生成：2026-10-02 · 明细报告：<code>/tmp/gh2/report_jd.md</code>（484 行）、
+  <code>report_pdd.md</code>（288 行）、<code>report_xianyu.md</code>（395 行）<br>
+  仓库源码：<code>/tmp/gh2/{jd,pdd,xianyu}/</code> · 全部结论标注「已读代码确认」或「仅 README 所述」
+</footer>
+
+</div>
+</body>
+</html>
