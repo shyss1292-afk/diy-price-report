@@ -1909,6 +1909,45 @@ def test_page_dead_not_swallowed() -> None:
                       "" if r == [] else f"返回 {r!r}")
             except Exception as e:
                 check(f"{code}：普通超时仍吞成空列表（不上抛）", False, f"上抛了 {e}")
+
+        # ---- ③ 解析层同样不能吞掉页面死亡 ----
+        # 取数阶段（page.evaluate / page.locator）也有 `except Exception → return []`。
+        # 同样的道理：页面在这时挂了，吞掉就会累加 empty_streak → 误判限流。
+        class _DeadPage:
+            def evaluate(self, *a, **k):
+                raise Exception(
+                    "Page.evaluate: Target page, context or browser has been closed"
+                )
+
+            def locator(self, *a, **k):
+                raise Exception(
+                    "Page.locator: Target page, context or browser has been closed"
+                )
+
+        # 让导航与行为模拟变成空操作，把流程推到取数阶段。
+        # ⚠️ 必须把**改过的每一个**都存下来恢复 —— 漏一个就会污染后续测试
+        #    （踩过：漏了 assert_not_rate_limited，把限流检测那条测试搞挂了）。
+        _patched = ("navigate", "behave", "settle", "assert_not_rate_limited")
+        _saved = {n: getattr(policy, n) for n in _patched}
+        policy.navigate = lambda *a, **k: None
+        policy.behave = lambda *a, **k: None
+        policy.settle = lambda *a, **k: None
+        policy.assert_not_rate_limited = lambda *a, **k: None
+        try:
+            for code in ("xianyu", "jd", "pdd"):
+                c = collectors.get(code)
+                if c is None:
+                    continue
+                raised = False
+                try:
+                    c._search(page=_DeadPage(), product=prod)
+                except Exception:
+                    raised = True
+                check(f"{code}：取数阶段页面死亡也要上抛", raised,
+                      "" if raised else "被吞成了空列表")
+        finally:
+            for n, fn in _saved.items():
+                setattr(policy, n, fn)
     finally:
         policy.navigate = orig_navigate
 

@@ -173,6 +173,10 @@ class PddCollector(BaseCollector):
         try:
             rows = page.evaluate(_EXTRACT_JS)
         except Exception as exc:
+            # ⚠️ 和 _search 同理：页面/浏览器已关闭不能被吞成"解析失败"。
+            # 吞掉会累加 empty_streak，连续 3 次就误判为限流 —— 方向指反。
+            if page_dead(exc):
+                raise
             logger.warning("拼多多解析失败 %s：%s", product.model, exc)
             return []
 
