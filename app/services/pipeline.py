@@ -624,6 +624,16 @@ def run_pipeline(
     # ⚠️ 它内部吞掉所有异常，绝不能因为告警把采集带崩。
     summary["alerts"] = healthcheck.check_round(summary)
 
+    # ---- 覆盖检查：每天一次（同一天重复调用会直接返回 None）----
+    # 找「很久没采到」的型号 —— 覆盖率问题的早期信号。
+    # 2026-10-01 统计时发现 54 个型号 14 天只采到过 1 天，当时没有任何机制会说这件事。
+    coverage = healthcheck.maybe_check_coverage()
+    if coverage:
+        summary["coverage"] = {
+            "never_collected": len(coverage["never_collected"]),
+            "stale": len(coverage["stale_models"]),
+        }
+
     notify("done", **{"listings": summary["listings"]})
     return summary
 

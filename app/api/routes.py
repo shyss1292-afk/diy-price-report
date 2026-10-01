@@ -514,6 +514,47 @@ def admin_status(db: Session = Depends(get_db)) -> dict:
     }
 
 
+@router.get("/admin/health")
+def admin_health(db: Session = Depends(get_db)) -> dict:
+    """采集健康 + 告警状态。
+
+    为什么要暴露到网页：2026-09-29 全天 0 条跑了一整天没人知道 ——
+    光有 macOS 通知还不够（通知会消失、机器可能没人看）。
+    网页上是**可回看**的：今天覆盖了多少、哪个源在熔断、最近报过什么警。
+    """
+    from ..services import alerting, breaker, healthcheck
+
+    # 今日覆盖率：有真实报价的在追型号数 / 在追型号总数
+    total = int(db.execute(
+        select(func.count()).select_from(Product).where(
+            Product.is_active.is_(True), Product.category.in_(("gpu", "cpu"))
+        )
+    ).scalar() or 0)
+    today = date.today()
+    covered = int(db.execute(
+        select(func.count(func.distinct(Listing.product_id))).select_from(Listing).join(
+            Platform, Platform.id == Listing.platform_id
+        ).where(
+            Listing.is_synthetic.is_(False),
+            Platform.is_active.is_(True),
+            Listing.trade_date == today,
+        )
+    ).scalar() or 0)
+
+    return {
+        "coverage": {
+            "date": today.isoformat(),
+            "covered": covered,
+            "total": total,
+            "pct": round(100.0 * covered / total, 1) if total else 0.0,
+        },
+        "health": healthcheck.status(),
+        "alerting": alerting.status(),
+        "breaker": breaker.snapshot(),
+        "breaker_summary": breaker.active_summary(),
+    }
+
+
 @router.get("/admin/logs")
 def admin_logs(limit: int = Query(30, ge=1, le=200), db: Session = Depends(get_db)) -> dict:
     rows = (

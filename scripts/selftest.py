@@ -1721,7 +1721,32 @@ def test_alerting_rules() -> None:
         finally:
             alerting.STATE_FILE, alerting.CONFIG_FILE = orig_state, orig_cfg
 
-    # ---- ⑦ 默认配置的规则键齐全（缺了会让规则静默失效）----
+    # ---- ⑩ 登录态失效 vs 限流（2026-10-01 PDD 卡死的守卫）----
+    # 熔断器只看「命中限流特征」，而 `login.html` 既是它的限流特征、
+    # 也是登录失效的证据。混为一谈的后果：PDD 跳 login.html → 熔断 1 天 →
+    # 到期重试 → 还是 login.html → 熔断更久 → **无限循环**，
+    # 而且看起来像在"正常退避"。必须单独识别并告诉用户「去重新扫码」。
+    le = healthcheck.evaluate_login_expired
+
+    hit = le({"pdd": {"reason": "login.html", "trips": 5, "remaining_text": "23小时"}})
+    check("login.html 被识别为登录态失效",
+          any(x["key"] == "login-expired:pdd" for x in hit), f"{[x['key'] for x in hit]}")
+    check("登录失效告警是 critical（等待没用，必须人工介入）",
+          all(x["level"] == "critical" for x in hit))
+    check("登录失效告警里给出**具体命令**（否则用户不知道怎么办）",
+          any("app.cli login --site pdd" in x["body"] for x in hit),
+          f"{[x['body'][:60] for x in hit]}")
+    check("登录失效告警说明「等待没用」（点破退避死循环）",
+          any("等待退避没有用" in x["body"] for x in hit))
+
+    for reason in ("访问频繁", "系统繁忙", "Too Many Requests", "429"):
+        check(f"「{reason}」不该被误判成登录失效",
+              not le({"jd": {"reason": reason, "trips": 2}}), reason)
+    check("空熔断状态不崩也不报", not le({}) and not le({"sources": {}}))
+    check("嵌套形状 {sources:{...}} 也兼容（文件形状与 snapshot 形状不同）",
+          bool(le({"sources": {"pdd": {"reason": "login.html"}}})))
+
+    # ---- ⑪ 默认配置的规则键齐全（缺了会让规则静默失效）----
     for k in ("zero_yield_rounds", "source_fail_rounds", "model_stale_days"):
         check(f"默认配置含规则 {k}", k in alerting.DEFAULT_CONFIG["rules"])
     check("告警默认开启（否则新装机器上等于没做）",

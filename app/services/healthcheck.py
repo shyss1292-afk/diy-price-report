@@ -60,6 +60,50 @@ def _save_state(state: dict) -> None:
         logger.warning("健康状态写入失败：%s", e)
 
 
+# 熔断原因里出现这些 → 是**登录态失效**，不是限流。
+# 区分很重要：限流「等一会儿」会好，登录失效**必须重新扫码**，
+# 等多久都没用 —— 退避阶梯只会让它越等越久（PDD 就这样卡了一整天）。
+LOGIN_EXPIRED_MARKERS = ("login.html", "passport", "请登录", "未登录", "登录失效")
+
+
+def evaluate_login_expired(cooldowns: dict) -> list[dict]:
+    """**纯函数**：从熔断状态里识别「登录态失效」，返回该报的警。
+
+    ⚠️ 为什么必须和限流分开：熔断器只看「命中限流特征」，
+       而 `login.html` 既是它的限流特征、也是登录失效的证据。
+       两者被混为一谈的后果（2026-10-01 实测）：
+         PDD 跳 login.html → 熔断 1 天 → 到期重试 → 还是 login.html
+         → 熔断更久 → 无限循环，永远采不到，而且**看起来像在正常退避**。
+       所以这里要单独识别，明确告诉用户「去重新扫码」。
+    """
+    alerts: list[dict] = []
+    # ⚠️ `breaker.snapshot()` 返回的是**扁平**结构：{源code: {reason, trips, ...}}
+    #    （不是嵌套在 "sources" 下 —— 那只是磁盘文件 breaker.json 的形状）
+    sources = (cooldowns or {}).get("sources")
+    if not isinstance(sources, dict) or not sources:
+        # 兼容两种形状：扁平 {pdd: {...}} / 嵌套 {sources: {pdd: {...}}}
+        sources = {
+            k: v for k, v in (cooldowns or {}).items()
+            if isinstance(v, dict) and ("reason" in v or "trips" in v)
+        }
+    for code, entry in sources.items():
+        reason = str((entry or {}).get("reason") or "")
+        if any(m.lower() in reason.lower() for m in LOGIN_EXPIRED_MARKERS):
+            trips = entry.get("trips")
+            remaining = entry.get("remaining_text") or ""
+            alerts.append({
+                "level": "critical",
+                "key": f"login-expired:{code}",
+                "title": f"{code} 登录态失效，需要重新扫码",
+                "body": (
+                    f"熔断原因「{reason}」= 平台把请求跳到了登录页，**不是限流**。"
+                    f"等待退避没有用（已连续第 {trips} 次，当前退避还剩 {remaining}）。"
+                    f"请执行：python -m app.cli login --site {code}"
+                ),
+            })
+    return alerts
+
+
 def evaluate_round(
     summary: dict,
     zero_streak: int,
@@ -169,6 +213,9 @@ def check_round(summary: dict) -> list[dict]:
             rules=rules,
         )
 
+        # 登录态失效单独识别（熔断器会把它误当成限流，见 evaluate_login_expired）
+        alerts += evaluate_login_expired(summary.get("cooldowns") or {})
+
         state["zero_streak"] = zero_streak
         state["source_fails"] = fails
         state["last_round"] = {
@@ -183,6 +230,32 @@ def check_round(summary: dict) -> list[dict]:
     except Exception as e:
         logger.warning("健康检查自身出错（已忽略）：%s", e)
         return []
+
+
+def maybe_check_coverage() -> dict | None:
+    """每天跑一次覆盖检查（同一自然日只跑一次），返回结果或 None。
+
+    为什么挂在轮次里而不是单独起定时任务：轮次本来就在跑，
+    多跑一次 SQL 的成本可以忽略；单独起一个定时任务反而多一处可能失效的地方
+    （这个项目已经吃过「告警只挂在单入口」的亏）。
+    """
+    try:
+        state = _load_state()
+        today = date.today().isoformat()
+        if state.get("last_coverage_check") == today:
+            return None
+        r = check_coverage()
+        state = _load_state()          # check_coverage 可能改过状态，重读
+        state["last_coverage_check"] = today
+        _save_state(state)
+        logger.info(
+            "覆盖检查（%s）：%d 个在追型号，从未采到 %d 个，超期未采 %d 个",
+            today, r["total_models"], len(r["never_collected"]), len(r["stale_models"]),
+        )
+        return r
+    except Exception as e:
+        logger.warning("覆盖检查失败（已忽略）：%s", e)
+        return None
 
 
 def reset_state() -> dict:
