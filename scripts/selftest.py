@@ -2682,8 +2682,172 @@ def test_browser_proxy_policy() -> None:
               f"ok={r3['ok']} problems={r3['problems']}")
 
 
+def test_price_normalization() -> None:
+    """价格与链接归一化 —— 样本全部来自**线上探针实测的卡片原文**。
+
+    守住的 bug（2026-10-01）：闲鱼把 `2.30万` 拆成三行渲染
+    （`¥` ⏎ `2` ⏎ `.30` ⏎ `万`），旧提取器只取「¥ 的下一行」→ 记成 ¥2.00，
+    导致**所有万元级二手报价被数据质量闸门当垃圾丢掉**
+    （症状：闲鱼库里价格上限恰好卡在 10000，RTX 4090 的 max 只有 9998）。
+    """
+    from app.collectors import normalize as N
+
+    # (片段, 期望值, 说明) —— 前 4 条是探针抓到的**真实卡片形态**
+    split_cases = [
+        (["2", ".30", "万"], 23000.0, "RTX4090 猛禽 2.30万（探针原文）"),
+        (["2", ".39", "万"], 23900.0, "ROG 4090 白色 2.39万（探针原文）"),
+        (["2", ".29", "万"], 22900.0, "ROG 4090 猛禽oc 2.29万（探针原文）"),
+        (["18", ".88"], 18.88, "5090 空盒子 18.88（探针原文）"),
+        (["4030"], 4030.0, "技嘉魔鹰坏卡"),
+        (["6299"], 6299.0, "微星超龙"),
+        (["1", "万"], 10000.0, "整万"),
+        (["168"], 168.0, "单片段"),
+        # ⚠️ 过度拼接的防守：后续段若不是「小数部分」或「万」就必须停。
+        #    否则「¥ 2688」后面跟一行「56人想拼」会被拼成 268856。
+        (["2688", "56"], 2688.0, "后续段不是小数/万 → 停在第 1 段"),
+        (["4030", "14"], 4030.0, "降价百分比行不能被拼进来"),
+        (["2", ".30", "万", "1", "人想要"], 23000.0, "万之后的内容一律忽略"),
+        (["人想要"], None, "首段不是数字 → 整条丢弃"),
+        # ⚠️ 上面那条**区分不出**「首段校验」是否存在：即使放开校验，
+        #    parse_price("人想要") 也找不到数字、照样返回 None。
+        #    这一条能区分 —— 去掉校验会得到 2.3 而不是 None。
+        (["¥2", ".30"], None, "首段带货币符号 → 必须整条拒绝（区分度用例）"),
+        (["2万"], None, "万跟着数字挤在一段里 → 同样拒绝"),
+        # ⚠️ 上面那条**区分不出**「首段校验」是否存在：即使放开校验，
+        #    parse_price("人想要") 也找不到数字、照样返回 None。
+        #    这一条能区分 —— 去掉校验会得到 2.3 而不是 None。
+        (["¥2", ".30"], None, "首段带货币符号 → 必须整条拒绝（区分度用例）"),
+        (["2万"], None, "万跟着数字挤在一段里 → 同样拒绝"),
+        ("4599.00", 4599.0, "传入字符串也能解析"),
+        # 单位倍率：删掉 _UNIT_MULTIPLIERS 里任一项都会被这几条抓住
+        ("1.2w", 12000.0, "w 单位（小写）"),
+        ("1.2W", 12000.0, "W 单位（大写）"),
+        ("3.5k", 3500.0, "k 单位"),
+        ("2.5万", 25000.0, "万单位（字符串形态）"),
+        # 单位倍率：删掉 _UNIT_MULTIPLIERS 里任一项都会被这几条抓住
+        ("1.2w", 12000.0, "w 单位（小写）"),
+        ("1.2W", 12000.0, "W 单位（大写）"),
+        ("3.5k", 3500.0, "k 单位"),
+        ("2.5万", 25000.0, "万单位（字符串形态）"),
+        ([], None, "空片段"),
+        (None, None, "缺失"),
+    ]
+    bad = []
+    for seg, expect, label in split_cases:
+        got = N.parse_split_price(seg)
+        ok = (got == expect) if expect is not None else (got is None)
+        if not ok:
+            bad.append(f"{label}: 期望 {expect} 实际 {got}")
+    check(f"拆分价格拼装（{len(split_cases)} 例，含探针原文）", not bad, "; ".join(bad))
+
+    # 京东形态（价格在一个节点里）+ 必须拒绝的噪声
+    text_cases = [
+        ("¥1,234.56", 1234.56, "千分位 + 小数"),
+        ("4599.00", 4599.0, "纯数字"),
+        ("¥ 18999", 18999.0, "带货币符号与空格"),
+        ("万图师", None, "品牌名里的「万」不能当单位"),
+        ("面议", None, "没有数字"),
+        ("¥", None, "只有符号"),
+        ("", None, "空串"),
+    ]
+    bad = []
+    for text, expect, label in text_cases:
+        got = N.parse_price(text)
+        ok = (got == expect) if expect is not None else (got is None)
+        if not ok:
+            bad.append(f"{label}: 期望 {expect} 实际 {got}")
+    check(f"价格文本解析（{len(text_cases)} 例）", not bad, "; ".join(bad))
+
+    # 链接归一化
+    check("闲鱼私有协议换成 https（否则库里存的链接点不开）",
+          N.normalize_url("fleamarket://item?id=123") == "https://www.goofish.com/item?id=123",
+          N.normalize_url("fleamarket://item?id=123"))
+    check("协议相对链接补 https",
+          N.normalize_url("//www.goofish.com/item?id=1") == "https://www.goofish.com/item?id=1")
+    check("去掉跟踪参数但保留商品 id",
+          N.normalize_url("https://www.goofish.com/item?id=9&spm=a1z&utm_source=x") ==
+          "https://www.goofish.com/item?id=9",
+          N.normalize_url("https://www.goofish.com/item?id=9&spm=a1z&utm_source=x"))
+    check("搜索页不能当商品身份（链接键必须为空）",
+          N.link_key("https://www.goofish.com/search?q=RTX+4090") == "")
+    check("商品链接能给出稳定键",
+          N.link_key("https://www.goofish.com/item?id=9&spm=a1z") ==
+          N.link_key("https://www.goofish.com/item?id=9&from=share"))
+
+    # ---- 采集器接线：**结构化**断言，不用子串 ----
+    #
+    # ⚠️ 这里踩过坑：第一版写成 `"priceSeg" in src` —— 把 JS 改成
+    #    `priceSeg: seg.slice(0, 1)`（退回只取第一段）它照样通过，
+    #    因为 Python 侧那句 `row.get("priceSeg")` 也含这个词。
+    #    源码断言用子串匹配一定不可靠（项目教训 #1），必须锚定到**具体行**。
+    import pathlib as _pl
+
+    srcs = {n: _pl.Path(f"app/collectors/{n}_source.py").read_text(encoding="utf-8")
+            for n in ("jd", "pdd", "xianyu")}
+
+    # (a) 三个采集器都必须调用 normalize 的解析器（锚定到调用形式）
+    CALL_JD = "normalize.parse_price(text)"
+    CALL_SPLIT = 'parse_split_price(row.get("priceSeg"))'
+    bad = [n for n in ("jd", "pdd", "xianyu")
+           if (CALL_JD if n == "jd" else CALL_SPLIT) not in srcs[n]]
+    check("三个采集器的价格解析都调用 normalize（不允许各写一套）",
+          not bad, f"未接入：{bad}")
+
+    # (b) 拼多多/闲鱼的 JS 必须**原样**产出完整 priceSeg
+    PUSH = "priceSeg: seg });"          # 注意：slice 版本不含这个串
+    GUARD = "test(t) || t === '万'"       # 「小数部分或万」的延续判据
+    for name in ("pdd", "xianyu"):
+        src = srcs[name]
+        check(f"{name}：JS 原样产出完整 priceSeg（不是只取第一段）",
+              PUSH in src and ".slice(0, 1)" not in src,
+              "出现了 seg.slice 或未找到完整 push —— 会把 2.30万 记成 2")
+        check(f"{name}：JS 保留「小数/万」延续判据",
+              GUARD in src,
+              "延续判据缺失 —— 可能把「56人想拼」拼进价格")
+
+def test_registry_is_clean() -> None:
+    """元守卫：测试注册表与定义必须一一对应。
+
+    为什么需要它（2026-10-01 实际踩到两次）：
+      1. 补丁脚本被重复执行 → 同一个测试函数被插入两次，注册表里也出现两遍；
+         "通过 N/N" 里 N 虚增，而**没有任何断言失效**，看起来一切正常。
+      2. 用块替换法改文件时，把夹在中间的某个 test_* 定义删掉了，但注册表
+         还留着它的名字 → 自检直接 NameError 崩掉，**所有反向验证都会假阳性**
+         （注入什么都"被拦住"，因为基线根本没跑起来）。
+
+    所以这里同时钉三件事：注册表无重复、定义无重复、定义与注册一一对应。
+    """
+    import pathlib as _pl
+    import re as _re
+
+    src = _pl.Path(__file__).read_text(encoding="utf-8")
+
+    block = _re.search(r"tests = \((.*?)\n    \)", src, _re.S)
+    check("能定位到测试注册表", block is not None)
+    if block is None:
+        return
+
+    names = [ln.strip().rstrip(",") for ln in block.group(1).splitlines() if ln.strip()]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    check("测试注册表无重复项", not dupes, f"重复：{dupes}")
+
+    defs = _re.findall(r"^def (test_\w+)", src, _re.M)
+    dup_defs = sorted({d for d in defs if defs.count(d) > 1})
+    check("没有重复定义的测试函数", not dup_defs, f"重复定义：{dup_defs}")
+
+    missing = sorted(set(names) - set(defs))
+    check("注册表里的每个测试都有定义（否则自检直接崩，反向验证会假阳性）",
+          not missing, f"有注册无定义：{missing}")
+
+    unregistered = sorted(set(defs) - set(names) - {"test_registry_is_clean"})
+    check("每个 test_* 函数都已注册（否则写了等于没写）",
+          not unregistered, f"未注册：{unregistered}")
+
+
 def main() -> int:
     tests = (
+        test_registry_is_clean,
+        test_price_normalization,
         test_browser_proxy_policy,
         test_ranking_direction,
         test_ranking_empty,

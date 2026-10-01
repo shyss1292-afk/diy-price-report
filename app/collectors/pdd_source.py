@@ -21,6 +21,7 @@ import os
 import urllib.parse
 from datetime import date
 
+from . import normalize
 from . import policy
 from .base import BaseCollector, Quote, page_dead, run_browser_batch
 from .registry import register
@@ -55,11 +56,32 @@ _EXTRACT_JS = r"""() => {
 
         const lines = (card.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
         const idx = lines.lastIndexOf('¥');
-        if (idx < 0 || !lines[idx + 1]) return;
-        const price = lines[idx + 1].replace(/,/g, '');
-        if (!/^\d+(\.\d+)?$/.test(price)) return;
+        if (idx < 0) return;
 
-        out.push({ title: lines[0] || '', price: price });
+        // 价格可能被**拆成多行**渲染。2026-10-01 实测闲鱼 RTX 4090：
+        //     ¥ ⏎ 2 ⏎ .30 ⏎ 万      （2.30万 = 23000）
+        //     ¥ ⏎ 18 ⏎ .88           （18.88）
+        //     ¥ ⏎ 4030               （4030）
+        // 旧实现只取「¥ 的下一行」→ 把 2.30万 记成了 2，
+        // 净效果是所有万元级二手报价被静默丢弃。
+        // 这里只**原样取片段**，拼装与判读交给 Python（那边能写单测）。
+        const seg = [];
+        for (let k = idx + 1; k < lines.length && seg.length < 4; k++) {
+            const t = lines[k];
+            if (seg.length === 0) {
+                // 首段：整数或小数（允许 .88 这种省略整数部分的写法）
+                if (!/^(\d[\d,]*|\d+\.\d+|\.\d+)$/.test(t)) break;
+                seg.push(t);
+            } else if (/^\.\d+$/.test(t) || t === '万') {
+                // 后续段：只接受小数部分或单位，遇到别的（如「56人想拼」）就停
+                seg.push(t);
+            } else {
+                break;
+            }
+        }
+        if (!seg.length) return;
+
+        out.push({ title: lines[0] || '', priceSeg: seg });
     });
     return out;
 }"""
@@ -182,9 +204,10 @@ class PddCollector(BaseCollector):
 
         quotes: list[Quote] = []
         for row in rows or []:
-            try:
-                price = float(row.get("price"))
-            except (TypeError, ValueError):
+            # 价格在页面上可能被拆成多行（¥ / 2 / .30 / 万），
+            # 由 priceSeg 拼装 —— 拼装逻辑在 collectors/normalize.py（可单测）
+            price = normalize.parse_split_price(row.get("priceSeg"))
+            if price is None:
                 continue
             title = (row.get("title") or "").strip()
             if price <= 0 or not title:

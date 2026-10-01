@@ -26,6 +26,7 @@ import re
 import urllib.parse
 from datetime import date
 
+from . import normalize
 from . import policy
 from .base import BaseCollector, Quote, page_dead, run_browser_batch
 from .registry import register
@@ -38,20 +39,15 @@ SEARCH_URL = "https://search.jd.com/Search?keyword={kw}&enc=utf-8"
 CARD_SELECTOR = '[class*="goodsCardWrapper"]'
 PRICE_SELECTOR = '[class*="_price_"]'
 
-_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)")
 
 
 def _to_price(text: str) -> float | None:
-    if not text:
-        return None
-    match = _NUM_RE.search(text.replace(",", ""))
-    if not match:
-        return None
-    try:
-        value = float(match.group(1))
-    except ValueError:
-        return None
-    return value if value > 0 else None
+    """京东的价格在一个节点里（如 "4599.00"），直接交给统一解析器。
+
+    统一到 `normalize.parse_price` 是为了让三个平台的**价格语义只有一处定义**
+    —— 顺带获得「万」单位支持（京东不出现，但没必要为此留一条特殊路径）。
+    """
+    return normalize.parse_price(text)
 
 
 @register
