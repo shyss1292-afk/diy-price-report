@@ -1835,6 +1835,84 @@ def test_alerting_rules() -> None:
             healthcheck.STATE_FILE = orig
 
 
+def test_page_dead_not_swallowed() -> None:
+    """「页面/浏览器已关闭」不能被吞成「搜索失败」。
+
+    为什么必须守
+    ------------
+    2026-10-01 20:30 实测：闲鱼一轮 15 个型号只采到 1 个就"判定已被限流"提前结束。
+    真凶不是限流，是**浏览器实例挂了**：
+
+        RX 6400 4G  : Page.wait_for_timeout: Target page...has been closed
+                      → 被识别为页面失效 → mark_dirty + 重建 ✅
+        RX 6600 XT  : Page.goto: Target page...has been closed
+                      → 被采集器内部的 `except Exception` 吞成"搜索失败"
+                      → 上层当成"搜索无结果"累加 empty_streak
+                      → 连续 3 次 → **误判为被限流，提前结束本轮** ❌
+
+    三个采集器（jd / xianyu / pdd）都有这个模式。被吞掉的代价是
+    整轮剩余型号全部放弃 —— 覆盖率直接掉一截，而日志上看起来像"平台限流"，
+    方向完全指反。
+    """
+    from types import SimpleNamespace
+
+    from app.collectors import get_collectors, policy
+    from app.collectors.base import page_dead
+
+    # ---- ① page_dead 的判定范围 ----
+    for msg in (
+        "Target page, context or browser has been closed",
+        "Page.goto: Target page, context or browser has been closed",
+        "Page.wait_for_timeout: Target page, context or browser has been closed",
+        "page crashed",
+        "Target closed",
+    ):
+        check(f"page_dead 认得：{msg[:42]}", page_dead(Exception(msg)))
+
+    for msg in ("Timeout 30000ms exceeded", "net::ERR_INTERNET_DISCONNECTED", "元素未找到"):
+        check(f"page_dead 不误判：{msg[:32]}", not page_dead(Exception(msg)))
+
+    # ---- ② 三个采集器都必须上抛页面死亡 ----
+    collectors = {c.code: c for c in get_collectors(None)}
+    orig_navigate = policy.navigate
+    prod = SimpleNamespace(model="RTX 5070 12G")
+
+    try:
+        for code in ("xianyu", "jd", "pdd"):
+            c = collectors.get(code)
+            if c is None:
+                continue
+
+            # 页面死亡 → 必须上抛
+            def _dead(*a, **k):
+                raise Exception(
+                    "Page.goto: Target page, context or browser has been closed"
+                )
+
+            policy.navigate = _dead
+            raised = False
+            try:
+                c._search(page=None, product=prod)
+            except Exception:
+                raised = True
+            check(f"{code}：页面死亡必须上抛（否则会被误判为限流）", raised,
+                  "" if raised else "被吞成了空列表")
+
+            # 普通失败 → 仍应吞成空列表（别改过头，否则单个型号超时就中断整轮）
+            def _timeout(*a, **k):
+                raise Exception("Timeout 30000ms exceeded")
+
+            policy.navigate = _timeout
+            try:
+                r = c._search(page=None, product=prod)
+                check(f"{code}：普通超时仍吞成空列表（不上抛）", r == [],
+                      "" if r == [] else f"返回 {r!r}")
+            except Exception as e:
+                check(f"{code}：普通超时仍吞成空列表（不上抛）", False, f"上抛了 {e}")
+    finally:
+        policy.navigate = orig_navigate
+
+
 def test_schedule_avoids_commute() -> None:
     """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
 
@@ -2166,6 +2244,7 @@ def main() -> int:
         test_ranking_empty,
         test_request_slimming,
         test_alerting_rules,
+        test_page_dead_not_swallowed,
         test_policy_delays,
         test_rate_limit_detection,
         test_breaker,

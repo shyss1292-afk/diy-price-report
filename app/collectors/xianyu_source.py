@@ -26,7 +26,7 @@ import urllib.parse
 from datetime import date
 
 from . import policy
-from .base import BaseCollector, Quote, run_browser_batch
+from .base import BaseCollector, Quote, page_dead, run_browser_batch
 from .registry import register
 
 logger = logging.getLogger("diyprice.collector.xianyu")
@@ -134,7 +134,14 @@ class XianyuCollector(BaseCollector):
         except policy.RateLimitError:
             raise
         except Exception as exc:
-            logger.warning("闲鱼搜索失败 %s：%s", product.model, exc)
+            # ⚠️ 「页面/浏览器已关闭」**不能**被吞成"搜索失败"。
+            # 吞掉之后 run_browser_batch 会把它当成"搜索无结果"累加 empty_streak，
+            # 连续 3 次就**误判为被限流**并提前结束本轮 —— 实测 2026-10-01 20:30
+            # 闲鱼一轮 15 个型号只采到 1 个就"判定限流"退出，真凶其实是浏览器实例挂了。
+            # 原样上抛，让上层走 mark_dirty + 重建实例（重建只要约 3 秒）。
+            if page_dead(exc):
+                raise
+            logger.warning("%s搜索失败 %s：%s", "闲鱼", product.model, exc)
             return []
 
         # 闲鱼是单页应用，没有可靠的服务端渲染信号，保留一个显式首屏等待
