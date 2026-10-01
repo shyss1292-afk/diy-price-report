@@ -1626,6 +1626,190 @@ def test_pdd_home_warmup() -> None:
     check("预热在 navigate 之前", src.index("HOME_URL") < src.index("policy.navigate(page, url"))
 
 
+def test_alerting_rules() -> None:
+    """告警规则与抑制。
+
+    为什么必须守：2026-09-29 全天 15 轮 0 条、覆盖 0/130，跑了一整天**没人知道** ——
+    项目当时只有 collect.log，没有任何主动通知。告警是新加的关键机制，
+    它自己失效的话，下次照样是"挂了没人知道"。
+
+    守三件事：
+      1. 该报的报（0 条 / 单源连续失败 / 全源不可用）
+      2. 不该报的不报（有数据、熔断跳过）
+      3. 抑制有效（否则持续故障每轮一条，人会对告警脱敏，比不报还糟）
+    """
+    from app.services import alerting, healthcheck
+
+    import json  # 本模块顶部没导 json（各测试按需导入）
+
+    rules = {"zero_yield_rounds": 1, "source_fail_rounds": 3, "model_stale_days": 7}
+
+    def src(code, status, items=0):
+        return {"source": code, "status": status, "items": items}
+
+    # ---- ① 本轮 0 条 → critical ----
+    a, zs, f = healthcheck.evaluate_round(
+        {"listings": 0, "sources": [src("jd", "failed"), src("xianyu", "failed")]},
+        zero_streak=0, fails={}, rules=rules)
+    check("本轮 0 条 → 报 critical",
+          any(x["level"] == "critical" and x["key"] == "zero-yield" for x in a),
+          f"{[x['key'] for x in a]}")
+    check("0 条时连续计数 +1", zs == 1, f"实际 {zs}")
+    check("0 条告警的标题带「连续 N 轮」（否则第 1 轮和第 10 轮长得一样）",
+          any("连续 1 轮" in x["title"] for x in a), f"{[x['title'] for x in a]}")
+
+    # ---- ② 有数据 → 不报，且连续计数归零 ----
+    a2, zs2, f2 = healthcheck.evaluate_round(
+        {"listings": 42, "sources": [src("jd", "success", 12), src("xianyu", "success", 30)]},
+        zero_streak=5, fails={"jd": 9}, rules=rules)
+    check("有数据时不报任何警", not a2, f"{[x['key'] for x in a2]}")
+    check("有数据时连续 0 条计数归零", zs2 == 0, f"实际 {zs2}")
+    check("源真采到数据后失败计数归零", f2.get("jd") == 0, f"实际 {f2.get('jd')}")
+
+    # ---- ③ 熔断跳过：既不 +1 也不归零 ----
+    # 不 +1：熔断是设计行为，不是新的失败
+    # 不归零：熔断恰恰是「撞到风控」的证据，归零会把问题掩盖掉
+    a3, _, f3 = healthcheck.evaluate_round(
+        {"listings": 10, "sources": [src("pdd", "skipped"), src("jd", "success", 10)]},
+        zero_streak=0, fails={"pdd": 2}, rules=rules)
+    check("熔断跳过不给失败计数 +1", f3.get("pdd") == 2, f"实际 {f3.get('pdd')}")
+    check("熔断跳过不报警", not any(x["key"].startswith("source-fail") for x in a3),
+          f"{[x['key'] for x in a3]}")
+
+    # ---- ④ 单源连续 N 轮失败 → warn（第 N 轮才报，不是第 1 轮）----
+    f_state: dict = {}
+    fired_at = None
+    for i in range(1, 5):
+        ai, _, f_state = healthcheck.evaluate_round(
+            {"listings": 30, "sources": [src("jd", "failed"), src("xianyu", "success", 30)]},
+            zero_streak=0, fails=f_state, rules=rules)
+        if any(x["key"] == "source-fail:jd" for x in ai):
+            fired_at = i
+            break
+    check("单源连续失败到第 3 轮才报警（不是第 1 轮就吵）", fired_at == 3, f"实际第 {fired_at} 轮")
+
+    # ---- ⑤ 全部源都 skipped → critical ----
+    a5, _, _ = healthcheck.evaluate_round(
+        {"listings": 0, "sources": [src("jd", "skipped"), src("pdd", "skipped")]},
+        zero_streak=0, fails={}, rules=rules)
+    check("全部源都在熔断退避 → 报 critical",
+          any(x["key"] == "all-sources-down" for x in a5), f"{[x['key'] for x in a5]}")
+
+    # ---- ⑥ 抑制：同一 key 在窗口内只发一次 ----
+    # ⚠️ 用临时文件，别碰真实告警状态（自检不该有副作用）
+    import tempfile
+    from pathlib import Path as _P
+    with tempfile.TemporaryDirectory() as td:
+        orig_state, orig_cfg = alerting.STATE_FILE, alerting.CONFIG_FILE
+        alerting.STATE_FILE = _P(td) / "alert_state.json"
+        alerting.CONFIG_FILE = _P(td) / "alert_config.json"
+        alerting.CONFIG_FILE.write_text(json.dumps({
+            "enabled": True,
+            "macos_notification": False,     # 自检不能真的弹通知
+            "webhook": {"enabled": False},
+            "cooldown_seconds": 3600,
+        }), encoding="utf-8")
+        try:
+            alerting.clear_suppression()
+            check("首个同 key 告警不被抑制", not alerting._suppressed("k", 3600))
+            alerting._mark_sent("k")
+            check("同 key 在冷却期内被抑制", alerting._suppressed("k", 3600))
+            check("冷却期为 0 时不抑制", not alerting._suppressed("k", 0))
+            check("不同 key 互不影响", not alerting._suppressed("other", 3600))
+            alerting.clear_suppression()
+            check("清抑制后立刻可再发", not alerting._suppressed("k", 3600))
+        finally:
+            alerting.STATE_FILE, alerting.CONFIG_FILE = orig_state, orig_cfg
+
+    # ---- ⑦ 默认配置的规则键齐全（缺了会让规则静默失效）----
+    for k in ("zero_yield_rounds", "source_fail_rounds", "model_stale_days"):
+        check(f"默认配置含规则 {k}", k in alerting.DEFAULT_CONFIG["rules"])
+    check("告警默认开启（否则新装机器上等于没做）",
+          alerting.DEFAULT_CONFIG["enabled"] is True)
+    check("macOS 通知默认开启（零配置通道，装了就能响）",
+          alerting.DEFAULT_CONFIG["macos_notification"] is True)
+
+    # ---- ⑧ 系统代理解析（2026-09-29 故障的守卫）----
+    # 那天系统代理开着指向 127.0.0.1:7897 但 Clash 没跑，Chromium 继承死代理，
+    # 15 轮全 0 条。预检要能**认出「代理开着」这件事**，否则早退逻辑不触发。
+    parse = healthcheck.parse_scutil_proxy
+    off = parse("""<dictionary> {
+  FTPPassive : 1
+  HTTPEnable : 0
+  HTTPSEnable : 0
+  SOCKSEnable : 0
+}""")
+    check("代理全关时 enabled=False", off["enabled"] is False, f"{off}")
+
+    on = parse("""<dictionary> {
+  FTPPassive : 1
+  HTTPEnable : 1
+  HTTPPort : 7897
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7897
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 7897
+  SOCKSProxy : 127.0.0.1
+}""")
+    check("代理开启时 enabled=True", on["enabled"] is True, f"{on}")
+    check("代理 host 解析正确", on["host"] == "127.0.0.1", f"{on['host']}")
+    check("代理 port 解析正确", on["port"] == 7897, f"{on['port']}")
+
+    only_socks = parse("HTTPEnable : 0\nSOCKSEnable : 1\nSOCKSPort : 1080\nSOCKSProxy : 10.0.0.1\n")
+    check("只开 SOCKS 也认（Chromium 同样会继承）",
+          only_socks["enabled"] and only_socks["port"] == 1080, f"{only_socks}")
+    check("空输入不崩", parse("")["enabled"] is False)
+
+    # ---- ⑨ 陈旧计数保护：断档后不该误报「连续 N 轮失败」----
+    # 机器关机一天后恢复，`source_fails` 里还留着几天前的计数。
+    # 直接沿用的话，恢复后的第一轮就会误报 —— 那个「连续」横跨了断档，不成立。
+    import tempfile as _tf
+    from pathlib import Path as _P2
+    with _tf.TemporaryDirectory() as td:
+        orig = healthcheck.STATE_FILE
+        healthcheck.STATE_FILE = _P2(td) / "health_state.json"
+        try:
+            # 造一份「8 小时前的状态，jd 已连续失败 3 轮」
+            stale_at = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 8 * 3600)
+            )
+            healthcheck.STATE_FILE.write_text(json.dumps({
+                "zero_streak": 5,
+                "source_fails": {"jd": 3},
+                "last_round": {"at": stale_at, "listings": 0},
+            }), encoding="utf-8")
+
+            alerts = healthcheck.check_round({
+                "listings": 30,
+                "sources": [{"source": "jd", "status": "success", "items": 30}],
+            })
+            check("断档超阈值后不误报「连续 N 轮失败」",
+                  not any(x["key"].startswith("source-fail") for x in alerts),
+                  f"{[x['key'] for x in alerts]}")
+            st = healthcheck.status()
+            check("断档后连续计数被清掉", st.get("zero_streak") == 0, f"{st.get('zero_streak')}")
+
+            # 对照：刚刚跑过的状态不该被清
+            fresh_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            healthcheck.STATE_FILE.write_text(json.dumps({
+                "zero_streak": 0,
+                "source_fails": {"jd": 2},
+                "last_round": {"at": fresh_at, "listings": 10},
+            }), encoding="utf-8")
+            healthcheck.check_round({
+                "listings": 10,
+                "sources": [{"source": "jd", "status": "failed", "items": 0}],
+            })
+            st2 = healthcheck.status()
+            check("刚跑过时计数**不**被清（2 失败 → 3）",
+                  (st2.get("source_fails") or {}).get("jd") == 3,
+                  f"{st2.get('source_fails')}")
+        finally:
+            healthcheck.STATE_FILE = orig
+
+
 def test_schedule_avoids_commute() -> None:
     """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
 
@@ -1956,6 +2140,7 @@ def main() -> int:
         test_ranking_direction,
         test_ranking_empty,
         test_request_slimming,
+        test_alerting_rules,
         test_policy_delays,
         test_rate_limit_detection,
         test_breaker,

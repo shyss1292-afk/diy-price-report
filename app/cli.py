@@ -476,6 +476,99 @@ def cmd_breaker(args) -> int:
     return 0
 
 
+def cmd_alert(args) -> int:
+    """告警通道：测试 / 查看 / 清抑制 / 生成配置。
+
+    为什么要有这个命令：告警是"出事才知道"的东西 —— 如果通道没配通，
+    你只会在真正出事时才发现"原来一直没响"。所以必须能主动自测。
+    """
+    from .services import alerting
+
+    if args.init:
+        p = alerting.ensure_config_file()
+        print(f"已生成配置文件：{p}")
+        print("默认只开 macOS 系统通知；要手机也能收到就填 webhook.url。")
+        return 0
+
+    if args.clear:
+        n = alerting.clear_suppression()
+        print(f"已清掉 {n} 条抑制记录（下次触发会立刻再发一次）")
+        return 0
+
+    if args.test:
+        r = alerting.self_test()
+        if r.get("sent"):
+            print(f"✅ 测试告警已发出（通道：{', '.join(r['channels'])}）")
+            print("   macOS 通知应在右上角弹出；配了 webhook 的话对应群里也会收到。")
+        else:
+            print(f"❌ 测试告警没发出去（原因：{r.get('reason', '通道全失败')}）")
+            print("   检查：1) alert_config.json 里 enabled / macos_notification 是否为 true")
+            print("         2) webhook.enabled 为 true 时 url 是否填了")
+        return 0 if r.get("sent") else 1
+
+    # 默认：显示状态
+    st = alerting.status()
+    print("=== 告警通道 ===")
+    print(f"  配置文件   : {st['config_file']}"
+          f"{'' if st['config_exists'] else '（不存在，用默认值；`alert --init` 生成）'}")
+    print(f"  总开关     : {'开' if st['enabled'] else '关'}")
+    print(f"  macOS 通知 : {'开' if st['macos_notification'] else '关'}")
+    print(f"  webhook    : {'开 · ' + st['webhook_type'] if st['webhook_enabled'] else '关'}")
+    print(f"  抑制窗口   : {st['cooldown_seconds']}s（同一个 key 在这个窗口内只发一次）")
+    rules = st.get("rules") or {}
+    print("  规则       :")
+    print(f"     连续 {rules.get('zero_yield_rounds')} 轮 0 条 → critical")
+    print(f"     单源连续 {rules.get('source_fail_rounds')} 轮失败 → warn")
+    print(f"     型号 {rules.get('model_stale_days')} 天未覆盖 → warn")
+    sup = st.get("suppressed") or {}
+    print(f"  当前抑制中 : {len(sup)} 条")
+    for k, v in sup.items():
+        print(f"     {k}  上次发送 {v}")
+    return 0
+
+
+def cmd_health(args) -> int:
+    """采集健康：连续失败轮数 + 型号覆盖。"""
+    from .services import healthcheck
+
+    if args.reset:
+        old = healthcheck.reset_state()
+        print(f"已清掉连续计数：0 条轮数 {old['zero_streak']} → 0，"
+              f"源失败计数 {old['source_fails']} → {{}}")
+        return 0
+
+    st = healthcheck.status()
+    print("=== 轮次健康状态 ===")
+    print(f"  状态文件     : {st['state_file']}")
+    print(f"  连续 0 条轮数: {st.get('zero_streak', 0)}")
+    last = st.get("last_round") or {}
+    if last:
+        print(f"  上一轮       : {last.get('at')} · {last.get('listings')} 条")
+    fails = st.get("source_fails") or {}
+    if fails:
+        print("  各源连续失败轮数：")
+        for k, v in sorted(fails.items()):
+            mark = "⚠️" if v else "  "
+            print(f"     {mark} {k:<8} {v} 轮")
+    else:
+        print("  各源连续失败轮数：无记录")
+
+    if args.check:
+        print()
+        print(f"=== 型号覆盖检查（回看 {args.days} 天）===")
+        r = healthcheck.check_coverage(days=args.days)
+        print(f"  在追型号   : {r['total_models']}")
+        print(f"  从未采到过 : {len(r['never_collected'])} 个")
+        for m in r["never_collected"][:15]:
+            print(f"     · {m}")
+        print(f"  超 {r['stale_after_days']} 天没采到: {len(r['stale_models'])} 个")
+        for x in r["stale_models"][:15]:
+            print(f"     · {x['model']}  最后 {x['last_seen']}")
+        if not r["never_collected"] and not r["stale_models"]:
+            print("  ✅ 覆盖正常，没有长期采不到的型号")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="app.cli", description="DIY 配件价格追踪系统命令行")
     parser.add_argument("--version", action="version", version=APP_VERSION)
@@ -549,6 +642,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_logout = sub.add_parser("logout", help="清除站点登录态")
     p_logout.add_argument("--site", default="all", help="站点 code，或 all")
     p_logout.set_defaults(func=cmd_logout)
+
+    p_alert = sub.add_parser("alert", help="告警通道：测试 / 查看 / 清抑制")
+    p_alert.add_argument("--test", action="store_true", help="发一条测试告警，验证通道")
+    p_alert.add_argument("--status", action="store_true", help="查看配置与抑制状态")
+    p_alert.add_argument("--clear", action="store_true", help="清掉抑制状态（改完配置想立刻验证时用）")
+    p_alert.add_argument("--init", action="store_true", help="生成默认配置文件")
+    p_alert.set_defaults(func=cmd_alert)
+
+    p_health = sub.add_parser("health", help="采集健康：连续失败轮数 / 型号覆盖")
+    p_health.add_argument("--days", type=int, default=14, help="覆盖检查的回看天数")
+    p_health.add_argument("--check", action="store_true", help="跑一次覆盖检查（会按需报警）")
+    p_health.add_argument("--reset", action="store_true", help="清掉连续计数（测试污染或人工确认后）")
+    p_health.set_defaults(func=cmd_health)
 
     return parser
 

@@ -38,6 +38,7 @@ from ..models import CrawlLog, Listing, Platform, PriceDaily, Product
 from .aggregate import refresh_daily
 from .bootstrap import bootstrap
 from .clean import check as clean_check
+from . import healthcheck
 from .normalize import ModelMatcher
 
 logger = logging.getLogger("diyprice.pipeline")
@@ -286,6 +287,31 @@ def run_pipeline(
 
     started = _time.monotonic()
     init_db()
+
+    # ---- 前置检查：系统代理 / 网络 ----
+    # 2026-09-29 的教训：macOS 系统代理开着但代理客户端没跑，Chromium 继承了这个
+    # 死代理，15 轮全部 0 条跑了一整天。在这里花几秒探一次，不通就**立刻结束本轮**
+    # 并告警 —— 比启动浏览器、撞 15 次墙、浪费 2 分钟强得多。
+    # ⚠️ 探的是「Chromium 实际走的路径」（读 scutil --proxy 再探那个端口），
+    #    不是「curl 能不能通」—— 后者不读系统代理，会给出错误结论。
+    from . import breaker as _breaker_for_preflight
+
+    pre = healthcheck.check_preflight()
+    if not pre["ok"]:
+        logger.error("前置检查不通过，本轮跳过：%s", "；".join(pre["problems"]))
+        return {
+            "listings": 0,
+            "unmatched": 0,
+            "filtered": 0,
+            "aggregated": 0,
+            "sources": [],
+            "skipped": [],
+            "cooldowns": _breaker_for_preflight.snapshot(),
+            "elapsed_sec": round(_time.monotonic() - started, 2),
+            "preflight": pre,
+            "alerts": [],
+        }
+    logger.info("前置检查通过（系统代理：%s）", pre["proxy"])
 
     # ---- 浏览器生命周期治理（短生命周期模型，见 services/browser_worker.py）----
     #   · 浏览器**按需**启动：第一个调用 worker.page() 的源负责把它拉起来，
@@ -590,6 +616,14 @@ def run_pipeline(
     # "这轮为什么某个源没数据"
     summary["cooldowns"] = breaker.snapshot()
     summary["elapsed_sec"] = round(_time.monotonic() - started, 2)
+
+    # ---- 健康检查：出问题就报警 ----
+    # 放在这里而不是 CLI 里：定时脚本、HTTP 触发、backfill 都会经过 run_pipeline，
+    # 挂在收尾能保证**所有入口**都有告警，不会因为走的是另一个入口就静默失败。
+    # （2026-09-29 全天 15 轮 0 条没人知道，就是因为告警只挂在某一个入口上。）
+    # ⚠️ 它内部吞掉所有异常，绝不能因为告警把采集带崩。
+    summary["alerts"] = healthcheck.check_round(summary)
+
     notify("done", **{"listings": summary["listings"]})
     return summary
 
