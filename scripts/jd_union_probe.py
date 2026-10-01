@@ -22,13 +22,23 @@
 
 用法
 ----
+凭据两种给法（**都绝不进版本库**）：
+
+    # 方式一：环境变量
     export JD_UNION_APP_KEY=你的AppKey
     export JD_UNION_APP_SECRET=你的AppSecret
+
+    # 方式二：写进 data/jd_union.json（data/ 已被 .gitignore 整目录覆盖）
+    {"app_key": "...", "secret_key": "..."}
 
     python -m scripts.jd_union_probe                          # 默认探 RTX 5070 12G
     python -m scripts.jd_union_probe --keyword "RTX 5090 32G"
     python -m scripts.jd_union_probe --method promotiongoodsinfo --sku 100012345678
     python -m scripts.jd_union_probe --params '{"keyword":"4060","pageIndex":1,"pageSize":30}'
+
+⚠️ 联盟后台的原话：「请妥善保管您的 appkey 和 secretkey，禁止保存在任何版本库托管服务
+   （如 GitHub）或以其他途径公开，否则可能被禁用。」—— 所以这里只从环境变量或
+   **gitignore 覆盖的** `data/` 目录读取，**任何情况下都不写进源码**。
 """
 from __future__ import annotations
 
@@ -42,6 +52,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+# 凭据文件（data/ 被 .gitignore 整目录覆盖，不会进版本库）
+CRED_FILE = Path(__file__).resolve().parent.parent / "data" / "jd_union.json"
 
 # 网关：主 + 备。实测两者返回一致（都是真网关）。
 GATEWAY = "https://api.jd.com/routerjson"
@@ -126,8 +140,11 @@ def explain(text: str) -> str:
     zh = err.get("zh_desc") or err.get("en_desc") or ""
     hints = {
         "10001": "app_key 没传对 / 请求体过大。检查环境变量是否生效。",
-        "15": "**方法名不存在 = 该应用没有这个接口的权限**。"
-              "去控制台「应用管理 → 接口权限」申请，或按官方文档发邮件到 cps@jd.com 开通。",
+        "15": "**方法名不存在 = 该 appkey 没有这个接口的权限**。\n"
+              "     官方错误码表原话：「没有调用该接口权限，请到\"控制中心\"->\"应用管理\""
+              "->\"接口管理\"进行申请」。\n"
+              "     实测：**连故意不存在的方法也返回同一个 15** —— 说明网关是拿"
+              "「该 appkey 的授权方法清单」匹配的，不在清单里一律报 15。",
         "11": "签名错误。换另一种签名算法再试（本脚本会自动试两种）。",
         "10003": "签名校验失败，同上。",
         "10002": "app_key 无效或未审核通过。",
@@ -140,6 +157,28 @@ def explain(text: str) -> str:
     return "\n".join(out)
 
 
+def load_credentials(cred_file: Path | None = None) -> tuple[str, str, str]:
+    """按 环境变量 → 凭据文件 的顺序取凭据。
+
+    ⚠️ 只从这两处读，**绝不硬编码**。联盟后台明说密钥公开会导致应用被禁用，
+       而这个项目是 git 仓库 —— 写进源码就等于写进 git 历史。
+    """
+    app_key = os.getenv("JD_UNION_APP_KEY", "").strip()
+    secret = os.getenv("JD_UNION_APP_SECRET", "").strip()
+    path = cred_file or CRED_FILE
+    note = "环境变量"
+    if not (app_key and secret) and path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            app_key = (data.get("app_key") or "").strip()
+            # 联盟后台叫 secretkey，这里两种拼写都认
+            secret = (data.get("secret_key") or data.get("secretkey") or "").strip()
+            note = str(path)
+        except Exception as e:
+            print(f"!! 读取 {path} 失败：{e}")
+    return app_key, secret, note
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="京东联盟 API 探针（验证覆盖率，不写入任何数据）")
     ap.add_argument("--keyword", default="RTX 5070 12G", help="搜索关键词")
@@ -148,16 +187,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--params", default=None, help="直接给业务参数 JSON（覆盖默认构造）")
     ap.add_argument("--page-size", type=int, default=30)
     ap.add_argument("--raw", action="store_true", help="只打印原始响应")
+    ap.add_argument("--cred", default=None,
+                    help="换一份凭据文件（用于 A/B 对比不同媒体类型的 appkey，如 data/jd_union_app.json）")
     args = ap.parse_args(argv)
 
-    app_key = os.getenv("JD_UNION_APP_KEY", "").strip()
-    secret = os.getenv("JD_UNION_APP_SECRET", "").strip()
+    app_key, secret, src = load_credentials(Path(args.cred) if args.cred else None)
     if not app_key or not secret:
-        print("!! 缺凭据。先设置环境变量：")
-        print("     export JD_UNION_APP_KEY=你的AppKey")
-        print("     export JD_UNION_APP_SECRET=你的AppSecret")
-        print("\n（AppKey/AppSecret 在 联盟开放平台 → 应用管理 → 应用证书 里）")
+        print("!! 缺凭据。两种给法（都不会进版本库）：")
+        print("     方式一：export JD_UNION_APP_KEY=...  JD_UNION_APP_SECRET=...")
+        print(f"     方式二：写进 {CRED_FILE}")
+        print('             {"app_key": "...", "secret_key": "..."}')
+        print("\n（AppKey / secretKey 在 京东联盟 → 推广管理 → 导购媒体管理 → 查看 → 弹窗里）")
         return 2
+    # 只打印前后各 4 位，避免完整密钥进日志
+    print(f"凭据来源：{src}   appkey={app_key[:4]}…{app_key[-4:]}")
 
     method = METHODS[args.method]
     if args.params:
