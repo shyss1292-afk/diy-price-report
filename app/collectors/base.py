@@ -270,9 +270,42 @@ def page_dead(exc: Exception) -> bool:
     )
 
 
+# 连续这么多次网络错误就判定「网络不可用」并提前结束本轮。
+# 与 empty_streak_limit 是两套独立阈值 —— 混用会互相污染归因。
+NET_STREAK_LIMIT = 3
+
+
+def network_dead(exc: Exception) -> bool:
+    """异常是否表示「网络不可用」（而不是平台在拦你）。
+
+    ⚠️ 必须和「搜索无结果」严格分开，这是**归因正确性**问题：
+       网络错误若混进 `empty_streak`，连续 3 次就会打出
+       「判定已被限流，提前结束本轮」—— 实测 2026-10-01 有多轮就是这么报的，
+       而日志里明明是 `ERR_INTERNET_DISCONNECTED`。
+       方向指反的代价：去查平台风控、调退避阶梯，全是在治错的病。
+
+    统计（2026-10-01）：`ERR_INTERNET_DISCONNECTED` 131 次，是最大头，
+    远超 `ERR_PROXY_CONNECTION_FAILED`（51，全在 09-29 那一天）。
+
+    ⚠️ 故意**不含** `ERR_CONNECTION_CLOSED` —— 那个既可能是本地网络问题，
+       也可能是平台主动掐断（风控），归到哪边都会误导。让它走普通失败路径。
+    """
+    text = str(exc).lower()
+    return any(
+        key in text
+        for key in (
+            "err_internet_disconnected",
+            "err_proxy_connection_failed",
+            "err_name_not_resolved",
+            "err_network_changed",
+            "err_address_invalid",
+            "err_socket_not_connected",
+        )
+    )
+
+
 def should_reset_backoff(quote_count: int, aborted: bool, suspect_throttle: bool) -> bool:
     """本轮够不够格把连续熔断计数清零（见 `breaker.record_success`）。
-
     三个条件缺一不可，放宽任何一条都会让退避阶梯白设：
 
       · quote_count > 0     —— 真的采到数据了
@@ -384,6 +417,8 @@ def run_browser_batch(
     # 外层重新借页 —— 借页会先完成回收重启，于是"每 N 个任务 / 每 M 分钟
     # 重启一次"在**采集过程中**就能生效。
     empty_streak = 0
+    net_streak = 0                        # 连续网络错误（与空结果分开计数）
+    network_down = False                  # 是否因网络不可用中止
     index = 0
     total = len(batch)
     session_tasks = 0
@@ -424,6 +459,31 @@ def run_browser_batch(
                             "%s 页面已失效，跳出本轮并重建浏览器实例（剩余型号留队列）", label
                         )
                         break     # 在坏页面上跑完剩下型号只会把它们全记成失败
+
+                    # ---- 网络故障：与「搜索无结果」严格分开 ----
+                    # ⚠️ 这是**归因正确性**问题，不是省几秒的问题。
+                    # 网络错误若混进 empty_streak，连续 3 次就会打出
+                    # 「判定已被限流，提前结束本轮」—— 实测 2026-10-01 有多轮
+                    # 就是这么报的，而日志里明明是 ERR_INTERNET_DISCONNECTED。
+                    # 方向指反的代价：去查平台风控、调退避阶梯，全是在治错的病。
+                    if network_dead(exc):
+                        net_streak += 1
+                        logger.warning(
+                            "%s 网络故障（连续第 %d 次）：%s",
+                            label, net_streak, str(exc)[:80],
+                        )
+                        if net_streak >= NET_STREAK_LIMIT:
+                            logger.warning(
+                                "%s 连续 %d 个型号都是网络错误，判定**网络不可用**"
+                                "（不是平台限流），提前结束本轮；"
+                                "剩余任务留在队列，下一轮优先重做。"
+                                "检查：Wi-Fi/热点、系统代理、代理客户端是否在跑。",
+                                label, net_streak,
+                            )
+                            network_down = True
+                            index = total
+                            break
+                        continue
                     continue
 
                 if found:
@@ -433,6 +493,7 @@ def run_browser_batch(
                     tq.mark_done(task.task_id, len(found))
                     fresh.extend(found)
                     empty_streak = 0
+                    net_streak = 0        # 采到数据 = 网络是通的
                     logger.info(
                         "%s [%d/%d] %s → %d 条", label, index, total, product.model, len(found)
                     )
@@ -544,6 +605,6 @@ def run_browser_batch(
     logger.info(
         "%s 采集结束：%d 个型号 → %d 条报价，耗时 %.1fs%s",
         label, len(batch), len(merged), time.monotonic() - started,
-        "（限流中止）" if aborted else "",
+        "（限流中止）" if aborted else ("（网络故障中止）" if network_down else ""),
     )
     return merged

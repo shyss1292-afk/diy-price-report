@@ -1913,6 +1913,72 @@ def test_page_dead_not_swallowed() -> None:
         policy.navigate = orig_navigate
 
 
+def test_network_error_not_counted_as_empty() -> None:
+    """网络故障不能被算成「搜索无结果」。
+
+    为什么必须守（归因正确性）
+    ------------------------
+    2026-10-01 实测：`ERR_INTERNET_DISCONNECTED` 出现 **131 次**，是所有浏览器
+    错误里最大的一头（远超 `ERR_PROXY_CONNECTION_FAILED` 的 51 次，那全在 09-29）。
+
+    但 `run_browser_batch` 原本把**所有**非限流异常都算进 `empty_streak`，
+    于是连续 3 次网络错误就打出「判定已被限流，提前结束本轮」——
+    日志里明明写着 `ERR_INTERNET_DISCONNECTED`。
+
+    方向指反的代价：去查平台风控、调退避阶梯，全是在治错的病。
+    所以网络错误必须走**独立计数** `net_streak`，不碰 `empty_streak`。
+    """
+    from app.collectors.base import NET_STREAK_LIMIT, network_dead
+
+    # ---- ① 认得「网络不可用」类错误 ----
+    for msg in (
+        "Page.goto: net::ERR_INTERNET_DISCONNECTED at https://www.goofish.com/search",
+        "net::ERR_PROXY_CONNECTION_FAILED at https://search.jd.com/Search",
+        "net::ERR_NAME_NOT_RESOLVED at https://mobile.yangkeduo.com/",
+        "net::ERR_NETWORK_CHANGED",
+        "net::ERR_ADDRESS_INVALID",
+        "net::ERR_SOCKET_NOT_CONNECTED",
+    ):
+        check(f"network_dead 认得：{msg[:44]}", network_dead(Exception(msg)))
+
+    # ---- ② 平台侧错误不能被误判成网络故障 ----
+    # 这些是平台在拦你 / 页面问题，归到网络会让人去查 Wi-Fi 而错过真因。
+    for msg in (
+        "Timeout 30000ms exceeded",
+        "Page.goto: Timeout 40000ms exceeded",
+        "Target page, context or browser has been closed",
+        "元素未找到",
+    ):
+        check(f"network_dead 不误判：{msg[:36]}", not network_dead(Exception(msg)))
+
+    # ⚠️ ERR_CONNECTION_CLOSED 故意**不**算网络故障：
+    #    既可能是本地网络，也可能是平台主动掐断（风控），归哪边都会误导。
+    check("ERR_CONNECTION_CLOSED 故意不归类（归哪边都会误导）",
+          not network_dead(Exception("net::ERR_CONNECTION_CLOSED")))
+
+    # ---- ③ 两套阈值必须是独立的常量 ----
+    check("NET_STREAK_LIMIT 存在且为正", isinstance(NET_STREAK_LIMIT, int) and NET_STREAK_LIMIT > 0,
+          f"{NET_STREAK_LIMIT}")
+
+    # ---- ④ 源码层守：网络分支不能去动 empty_streak ----
+    # 这是结构性约束，只能查源码 —— 但查的是**正向**（网络分支里不出现
+    # empty_streak），不是"某字符串不存在"那种脆弱的负向检查。
+    import inspect
+
+    from app.collectors import base as base_mod
+
+    src = inspect.getsource(base_mod.run_browser_batch)
+    net_branch_start = src.find("if network_dead(exc):")
+    check("run_browser_batch 里有网络分支", net_branch_start > 0)
+    if net_branch_start > 0:
+        # 取网络分支到下一个 `continue` 之间
+        seg = src[net_branch_start:net_branch_start + 900]
+        dirty = "empty_streak" in seg.split("continue")[0]
+        check("网络分支不碰 empty_streak（否则会误报限流）", not dirty,
+              "网络分支里出现了 empty_streak" if dirty else "")
+        check("网络分支用的是独立计数 net_streak", "net_streak" in seg)
+
+
 def test_schedule_avoids_commute() -> None:
     """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
 
@@ -2245,6 +2311,7 @@ def main() -> int:
         test_request_slimming,
         test_alerting_rules,
         test_page_dead_not_swallowed,
+        test_network_error_not_counted_as_empty,
         test_policy_delays,
         test_rate_limit_detection,
         test_breaker,

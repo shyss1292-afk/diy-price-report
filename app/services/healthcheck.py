@@ -402,6 +402,38 @@ def _tcp_ok(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
+def _http_ok(proxy_host: str = "", proxy_port: int = 0,
+             url: str = "https://www.baidu.com", timeout: float = 6.0) -> bool:
+    """发一个**真实 HTTP 请求**，走指定的代理（或显式不走代理）。
+
+    ⚠️ 为什么不能只探端口：代理端口开着 ≠ 代理能上网。
+       节点挂掉时端口照样 accept，TCP 探活会通过，然后 Chromium 拿到的
+       还是 `ERR_INTERNET_DISCONNECTED` / `ERR_PROXY_CONNECTION_FAILED` ——
+       预检就白做了。必须真的走一次请求。
+
+    ⚠️ 必须**显式**传 ProxyHandler：`urllib` 的默认 opener 在 macOS 上会读
+       系统代理，但行为不稳定；显式指定才能保证探的就是 Chromium 会走的那条路。
+    """
+    import urllib.request
+
+    if proxy_host and proxy_port:
+        handlers = [urllib.request.ProxyHandler({
+            "http": f"http://{proxy_host}:{proxy_port}",
+            "https": f"http://{proxy_host}:{proxy_port}",
+        })]
+    else:
+        handlers = [urllib.request.ProxyHandler({})]   # 空 dict = 显式不走代理
+    opener = urllib.request.build_opener(*handlers)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with opener.open(req, timeout=timeout) as resp:
+            resp.read(256)
+            return 200 <= resp.status < 500
+    except Exception as e:
+        logger.debug("HTTP 探活失败（proxy=%s:%s）：%s", proxy_host or "-", proxy_port or "-", e)
+        return False
+
+
 def preflight() -> dict:
     """轮次前置检查：系统代理可用性 + 网络连通性。
 
@@ -420,6 +452,7 @@ def preflight() -> dict:
        所以这里读 `scutil --proxy` 拿真实代理设置，再探那个端口。
     """
     problems: list[str] = []
+    detail: dict = {}
 
     proxy = _system_proxy()
     if proxy["enabled"]:
@@ -433,8 +466,24 @@ def preflight() -> dict:
                 f"代理客户端（Clash/Surge 等）没在运行？"
                 f"Chromium 会继承这个代理，所有请求都会失败"
             )
+        else:
+            # 端口通 ≠ 能上网。必须真的走一次请求（节点挂了端口照样 accept）。
+            if not _http_ok(host, port):
+                problems.append(
+                    f"系统代理 {host}:{port} 端口通但**上不了网** —— "
+                    f"代理节点挂了 / 订阅过期？Chromium 会继承这个代理，"
+                    f"所有请求都会 ERR_INTERNET_DISCONNECTED"
+                )
+            detail["http_via_proxy"] = True
+    else:
+        # 没开系统代理 → Chromium 直连，这里也直连探一次
+        if not _http_ok():
+            problems.append(
+                "直连上不了网（未开系统代理，Chromium 会直连）—— "
+                "检查 Wi-Fi / 热点是否正常"
+            )
 
-    # 基础连通性：走系统代理的路径不可靠，这里用直连探一个公共 DNS 端口
+    # 基础连通性：直连探公共 DNS 端口
     if not _tcp_ok("223.5.5.5", 53, timeout=3.0) and not _tcp_ok("1.1.1.1", 53, timeout=3.0):
         problems.append("基础网络不通（223.5.5.5:53 与 1.1.1.1:53 都连不上）")
 
@@ -443,6 +492,7 @@ def preflight() -> dict:
         "problems": problems,
         "proxy_enabled": proxy["enabled"],
         "proxy": f"{proxy['host']}:{proxy['port']}" if proxy["enabled"] else "未开启",
+        **detail,
     }
 
 
