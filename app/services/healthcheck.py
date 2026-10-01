@@ -460,42 +460,50 @@ def preflight() -> dict:
     在轮次开始前花几秒探一次，不通就**早退 + 告警**，
     而不是浪费整轮（约 2 分钟 + 一堆无效请求）去撞。
 
-    ⚠️ 探测必须覆盖「Chromium 实际走的路径」，而不是「命令行能不能通」：
+    ⚠️ 探测必须覆盖「采集浏览器实际走的路径」，而不是「命令行能不能通」：
        **curl 不读 macOS 系统代理，Chromium 读**。用 curl 探会得出
        "网络正常"的错误结论 —— 我 09-29 就是这么误判的。
-       所以这里读 `scutil --proxy` 拿真实代理设置，再探那个端口。
+
+    🔧 2026-10-01 起：采集浏览器已配 `--no-proxy-server`
+       （见 `session.browser_proxy_args()`），**不再继承系统代理**。
+       所以这里以「浏览器实际走的那条路」为准去探；系统代理状态仍然记录在
+       detail 里供排查，但**不再据此拦轮次** —— 那正是 22:30 白丢一整轮的原因。
     """
+    from .session import browser_proxy_args
+
     problems: list[str] = []
     detail: dict = {}
 
     proxy = _system_proxy()
-    if proxy["enabled"]:
-        host = proxy["host"] or "127.0.0.1"
-        port = proxy["port"]
-        if not port:
-            problems.append(f"系统代理已开启但读不到端口（{proxy['host'] or '空'}）")
-        elif not _tcp_ok(host, port):
-            problems.append(
-                f"系统代理指向 {host}:{port} 但**连不上** —— "
-                f"代理客户端（Clash/Surge 等）没在运行？"
-                f"Chromium 会继承这个代理，所有请求都会失败"
-            )
-        else:
-            # 端口通 ≠ 能上网。必须真的走一次请求（节点挂了端口照样 accept）。
-            if not _http_ok(host, port):
-                problems.append(
-                    f"系统代理 {host}:{port} 端口通但**上不了网** —— "
-                    f"代理节点挂了 / 订阅过期？Chromium 会继承这个代理，"
-                    f"所有请求都会 ERR_INTERNET_DISCONNECTED"
-                )
-            detail["http_via_proxy"] = True
+    detail["system_proxy"] = (
+        f"{proxy['host']}:{proxy['port']}" if proxy["enabled"] else "未开启"
+    )
+
+    # 探「采集浏览器实际会走的那条路」，而不是「系统代理怎么配」
+    browser_path = browser_proxy_args()
+    if browser_path and browser_path[0].startswith("--proxy-server="):
+        spec = browser_path[0].split("=", 1)[1]
+        detail["browser_path"] = f"proxy:{spec}"
+        host = spec.split("//", 1)[-1].rpartition(":")[0]
+        port_s = spec.rpartition(":")[2]
+        try:
+            port = int(port_s)
+        except ValueError:
+            port = 0
+        if not port or not _tcp_ok(host, port):
+            problems.append(f"DIYPRICE_BROWSER_PROXY 指向 {spec} 但**连不上**")
+        elif not _http_ok(host, port):
+            problems.append(f"DIYPRICE_BROWSER_PROXY {spec} 端口通但**上不了网**")
     else:
-        # 没开系统代理 → Chromium 直连，这里也直连探一次
+        # 默认路径：浏览器直连。系统代理开着也与采集无关 —— 只记录，不拦轮次。
+        detail["browser_path"] = "direct"
         if not _http_ok():
             problems.append(
-                "直连上不了网（未开系统代理，Chromium 会直连）—— "
-                "检查 Wi-Fi / 热点是否正常"
+                "直连上不了网 —— 采集浏览器已配 --no-proxy-server（不继承系统代理），"
+                "所以这是**本机网络**问题：检查 Wi-Fi / 热点"
             )
+        if proxy["enabled"]:
+            detail["system_proxy_ignored"] = True
 
     # 基础连通性：直连探公共 DNS 端口
     if not _tcp_ok("223.5.5.5", 53, timeout=3.0) and not _tcp_ok("1.1.1.1", 53, timeout=3.0):

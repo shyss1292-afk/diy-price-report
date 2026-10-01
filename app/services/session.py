@@ -61,6 +61,40 @@ def _env_int(name: str, default: int) -> int:
 # "明明启动了却连不上"的假故障。
 CDP_PORT = _env_int("DIYPRICE_CDP_PORT", 9222)
 
+# 采集浏览器的代理策略 —— **默认直连，显式忽略系统代理**。
+#
+# 为什么必须这样（两次真实损失换来的结论）
+# --------------------------------------
+# Chromium 默认继承 macOS 系统代理。而采集目标（京东 / 拼多多 / 闲鱼）都是
+# **国内站，本来就不需要代理**。继承带来的全是坏处：
+#
+#   1. 代理一挂，采集全废。实测两次：
+#      · 2026-09-29：系统代理开着但 Clash 没运行 → 每个请求打死端口 →
+#        15 轮全部 0 条，**跑了一整天没人知道**（当天 51 次 ERR_PROXY_CONNECTION_FAILED）
+#      · 2026-10-01 22:30：系统代理端口通但节点已死 → 前置检查拦下整轮
+#        同日 16:44 / 17:00 京东报 ERR_INTERNET_DISCONNECTED，同一个根因
+#   2. 代理可用时更糟 —— 国内电商流量绕境外节点，登录态账号配境外 IP，
+#      这是风控眼里的典型"账号被盗用"信号，等于主动招惹限流。
+#
+# 所以采集浏览器**显式 `--no-proxy-server`**，与用户怎么开 Clash 完全解耦。
+# 真要给它指定代理（例如换到必须走代理的网络），设
+# `DIYPRICE_BROWSER_PROXY=http://host:port` 即可。
+def browser_proxy_setting() -> str:
+    """当前配置的代理（空串 = 直连）。**每次读环境变量** —— 进程内可改，便于排障与单测。"""
+    return os.getenv("DIYPRICE_BROWSER_PROXY", "").strip()
+
+
+def browser_proxy_args() -> list[str]:
+    """采集浏览器的代理启动参数（**全项目唯一来源**）。"""
+    spec = browser_proxy_setting()
+    return [f"--proxy-server={spec}"] if spec else ["--no-proxy-server"]
+
+
+def browser_proxy_label() -> str:
+    """给人看的代理路径描述（日志 / 前置检查 / CLI 用）。"""
+    return browser_proxy_setting() or "直连（忽略系统代理）"
+
+
 # 磁盘缓存目录 —— **外置**到系统临时目录，不留在 profile 里。
 #
 # 为什么必须外置：profile 是长期复用的（登录态在 Cookies 里），而磁盘缓存
@@ -250,6 +284,8 @@ def build_launch_args(
         "--password-store=basic",            # 不碰系统钥匙串，避免弹窗打断
         "--use-mock-keychain",
         "--disable-extensions",              # 禁个人扩展
+        # 代理策略见 browser_proxy_args() 的说明：默认直连，不继承系统代理
+        *browser_proxy_args(),
         # 磁盘缓存外置到临时目录，见 DISK_CACHE_DIR 的说明。
         # 这是"防膨胀"的第一道：从源头就不让它写进 profile。
         f"--disk-cache-dir={disk_cache_dir or DISK_CACHE_DIR}",

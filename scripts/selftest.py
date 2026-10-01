@@ -2583,8 +2583,77 @@ def test_request_slimming_rules() -> None:
 
 # ====================================================================== 主流程
 
+def test_browser_proxy_policy() -> None:
+    """采集浏览器必须**不继承系统代理**。
+
+    守住的是 2026-09-29（开代理但 Clash 没运行 → 15 轮全 0 条，跑了一整天没人知道）
+    与 2026-10-01 22:30（代理节点死 → 前置检查拦下整轮）这两次真实损失。
+    """
+    from app.services import healthcheck
+    from app.services import session as sess
+
+    # ---- 启动参数 ----
+    with mock.patch.dict(os.environ, {"DIYPRICE_BROWSER_PROXY": ""}, clear=False):
+        os.environ.pop("DIYPRICE_BROWSER_PROXY", None)
+        args = sess.build_launch_args("/x/Chrome", "/tmp/p", 9222)
+        check("默认给采集浏览器加 --no-proxy-server（不继承系统代理）",
+              "--no-proxy-server" in args,
+              f"实际 {[a for a in args if 'proxy' in a]}")
+        check("默认不加 --proxy-server",
+              not any(a.startswith("--proxy-server=") for a in args))
+        check("默认代理描述为直连", "直连" in sess.browser_proxy_label())
+
+    # ---- 显式指定代理时（可覆盖）----
+    with mock.patch.dict(os.environ, {"DIYPRICE_BROWSER_PROXY": "http://127.0.0.1:7897"}):
+        args2 = sess.build_launch_args("/x/Chrome", "/tmp/p", 9222)
+        check("设了 DIYPRICE_BROWSER_PROXY 时用 --proxy-server",
+              "--proxy-server=http://127.0.0.1:7897" in args2)
+        check("设了代理时不再加 --no-proxy-server",
+              "--no-proxy-server" not in args2)
+
+    # ---- 前置检查：系统代理开着但已死时，**不能**再拦轮次（22:30 的真实场景）----
+    dead_proxy = {"enabled": True, "host": "127.0.0.1", "port": 7897}
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("DIYPRICE_BROWSER_PROXY", None)
+        with mock.patch.object(healthcheck, "_system_proxy", return_value=dead_proxy), \
+             mock.patch.object(healthcheck, "_tcp_ok", return_value=True), \
+             mock.patch.object(healthcheck, "_http_ok", return_value=True):
+            r = healthcheck.preflight()
+        check("系统代理开着但已死 + 浏览器直连 → 前置检查**放行**（不再白丢整轮）",
+              r["ok"] is True and not r["problems"],
+              f"ok={r['ok']} problems={r['problems']}")
+        check("系统代理状态仍被记录（供排查）",
+              r.get("system_proxy") == "127.0.0.1:7897"
+              and r.get("browser_path") == "direct")
+        check("标记了「系统代理已被忽略」",
+              r.get("system_proxy_ignored") is True)
+
+        # ---- 直连真的不通时，仍然要拦 ----
+        with mock.patch.object(healthcheck, "_system_proxy", return_value=dead_proxy), \
+             mock.patch.object(healthcheck, "_tcp_ok", return_value=True), \
+             mock.patch.object(healthcheck, "_http_ok", return_value=False):
+            r2 = healthcheck.preflight()
+        check("直连真的上不了网 → 仍然拦下（误放行也不行）",
+              r2["ok"] is False
+              and any("直连上不了网" in p for p in r2["problems"]),
+              f"ok={r2['ok']} problems={r2['problems']}")
+
+    # ---- 显式配了代理 → 探的就是那个代理 ----
+    with mock.patch.dict(os.environ, {"DIYPRICE_BROWSER_PROXY": "http://127.0.0.1:7897"}):
+        with mock.patch.object(healthcheck, "_system_proxy",
+                               return_value={"enabled": False, "host": "", "port": 0}), \
+             mock.patch.object(healthcheck, "_tcp_ok", return_value=False), \
+             mock.patch.object(healthcheck, "_http_ok", return_value=True):
+            r3 = healthcheck.preflight()
+        check("显式配的代理连不上 → 拦下并指明是 DIYPRICE_BROWSER_PROXY",
+              r3["ok"] is False
+              and any("DIYPRICE_BROWSER_PROXY" in p for p in r3["problems"]),
+              f"ok={r3['ok']} problems={r3['problems']}")
+
+
 def main() -> int:
     tests = (
+        test_browser_proxy_policy,
         test_ranking_direction,
         test_ranking_empty,
         test_request_slimming,
