@@ -166,8 +166,16 @@ _SCHEME_REWRITES: tuple[tuple[str, str], ...] = (
 
 # 跟踪参数：不影响商品身份，去掉后同一商品只有一种写法（去重键才稳定）
 _TRACKING_PARAMS = re.compile(
-    r"^(utm_[a-z]+|spm|scm|from|share_\w+|source|refer|src|ttid|tk|_t|timestamp)$",
+    r"^(utm_[a-z]+|spm|scm|from|share_\w+|source|refer|src|ttid|tk|_t|timestamp"
+    r"|referpageargs|gulsource|search_from_page|original_q|bizfrom)$",
     re.I,
+)
+
+# 商品页**只保留身份参数** —— 闲鱼的商品页链接会跟一长串检索来源参数
+# （referPageArgs / gulSource / …），全留着会让"同一个商品"有多个不同键，
+# 去重就会失效。identity 参数才是商品身份。
+_IDENTITY_ONLY = (
+    ("goofish.com", "/item", ("id",)),
 )
 
 
@@ -193,7 +201,11 @@ def normalize_url(url: object) -> str:
     if s.startswith("//"):
         s = "https:" + s
     if "://" not in s:
-        return s
+        # 不是 URL 就返回空串 —— **不要原样返回**。
+        # 实测（2026-10-02）闲鱼响应里部分 targetUrl 是加密的不透明串
+        # （如 `z9xpXnwzz6eu3JHQ…=`），原样返回会被当成"链接"存进库，
+        # 既点不开、也会污染去重键。
+        return ""
 
     s = s.split("#", 1)[0]
     if "?" not in s:
@@ -204,6 +216,18 @@ def normalize_url(url: object) -> str:
         pair for pair in query.split("&")
         if pair and not _TRACKING_PARAMS.match(pair.split("=", 1)[0])
     ]
+
+    # 商品页只留身份参数（见 _IDENTITY_ONLY 的说明）
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(head)
+    for host_suffix, path_prefix, names in _IDENTITY_ONLY:
+        if parts.netloc.endswith(host_suffix) and path_prefix in parts.path:
+            identity = [p for p in kept if p.split("=", 1)[0] in names]
+            if identity:
+                kept = identity
+            break
+
     return head + ("?" + "&".join(kept) if kept else "")
 
 

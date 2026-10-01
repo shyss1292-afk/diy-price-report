@@ -291,6 +291,13 @@ def test_policy_delays() -> None:
 class _FakePage:
     """只实现 detect_rate_limit 用到的三个接口。"""
 
+    def on(self, *_a, **_k):
+        """响应监听 —— 真实 Playwright 页面必有；假页面空实现即可。"""
+        return self
+
+    def remove_listener(self, *_a, **_k):
+        return None
+
     def __init__(self, url: str = "", title: str = "", text: str = "") -> None:
         self.url = url
         self._title = title
@@ -1866,6 +1873,22 @@ def test_alerting_rules() -> None:
             healthcheck.STATE_FILE = orig
 
 
+class _StubPage:
+    """只实现 `_search` 在 navigate **之前**会碰到的接口。
+
+    为什么需要它：`_search` 现在会先挂响应监听（`page.on("response")`），
+    位置必须在 navigate 之前 —— 否则接不到搜索接口的响应。
+    所以测试替身不能再传 `page=None`：该跟上真实接口的是替身，
+    而不是让生产代码为测试让路。
+    """
+
+    def on(self, *_a, **_k):
+        return self
+
+    def remove_listener(self, *_a, **_k):
+        return None
+
+
 def test_page_dead_not_swallowed() -> None:
     """「页面/浏览器已关闭」不能被吞成「搜索失败」。
 
@@ -1903,7 +1926,7 @@ def test_page_dead_not_swallowed() -> None:
     for msg in ("Timeout 30000ms exceeded", "net::ERR_INTERNET_DISCONNECTED", "元素未找到"):
         check(f"page_dead 不误判：{msg[:32]}", not page_dead(Exception(msg)))
 
-    # ---- ② 三个采集器都必须上抛页面死亡 ----
+        # ---- ② 三个采集器都必须上抛页面死亡 ----
     collectors = {c.code: c for c in get_collectors(None)}
     orig_navigate = policy.navigate
     prod = SimpleNamespace(model="RTX 5070 12G")
@@ -1923,7 +1946,7 @@ def test_page_dead_not_swallowed() -> None:
             policy.navigate = _dead
             raised = False
             try:
-                c._search(page=None, product=prod)
+                c._search(page=_StubPage(), product=prod)
             except Exception:
                 raised = True
             check(f"{code}：页面死亡必须上抛（否则会被误判为限流）", raised,
@@ -1935,7 +1958,7 @@ def test_page_dead_not_swallowed() -> None:
 
             policy.navigate = _timeout
             try:
-                r = c._search(page=None, product=prod)
+                r = c._search(page=_StubPage(), product=prod)
                 check(f"{code}：普通超时仍吞成空列表（不上抛）", r == [],
                       "" if r == [] else f"返回 {r!r}")
             except Exception as e:
@@ -1949,6 +1972,13 @@ def test_page_dead_not_swallowed() -> None:
                 raise Exception(
                     "Page.evaluate: Target page, context or browser has been closed"
                 )
+
+            def on(self, *_a, **_k):
+                """响应监听 —— 真实 Playwright 页面必有；假页面空实现即可。"""
+                return self
+
+            def remove_listener(self, *_a, **_k):
+                return None
 
             def locator(self, *a, **k):
                 raise Exception(
@@ -2788,8 +2818,10 @@ def test_price_normalization() -> None:
     # (a) 三个采集器都必须调用 normalize 的解析器（锚定到调用形式）
     CALL_JD = "normalize.parse_price(text)"
     CALL_SPLIT = 'parse_split_price(row.get("priceSeg"))'
+    CALL_DOM = 'normalize.parse_split_price(r.get("priceSeg"))'   # DOM 兜底路径
     bad = [n for n in ("jd", "pdd", "xianyu")
-           if (CALL_JD if n == "jd" else CALL_SPLIT) not in srcs[n]]
+           if (CALL_JD if n == "jd" else
+               (CALL_SPLIT if n == "pdd" else CALL_DOM)) not in srcs[n]]
     check("三个采集器的价格解析都调用 normalize（不允许各写一套）",
           not bad, f"未接入：{bad}")
 
@@ -2804,6 +2836,144 @@ def test_price_normalization() -> None:
         check(f"{name}：JS 保留「小数/万」延续判据",
               GUARD in src,
               "延续判据缺失 —— 可能把「56人想拼」拼进价格")
+
+def test_xianyu_api_parse() -> None:
+    """闲鱼搜索接口解析 —— 样本结构取自 2026-10-02 线上实捕的 300 KB 响应。
+
+    这条路的价值：不再依赖渲染结果（类名改版不影响），并拿到 DOM 上看不到的
+    字段（发布时间 / 地区 / 商品链接）。第三条断言是**回落保障** ——
+    接口一旦失效必须能自动退回 DOM，不能整源归零。
+    """
+    from app.collectors import normalize as N
+    from app.collectors import normalize as N
+    from app.collectors import xianyu_source as X
+
+    def node(title, price, url="fleamarket://item?id=1", publish="1790871637000",
+             area="广东"):
+        return {
+            "type": "item",
+            "data": {
+                "item": {
+                    "main": {
+                        "exContent": {"title": title, "area": area, "itemId": "1",
+                                      "picUrl": "//img/a.jpg"},
+                        "clickParam": {"args": {"price": price, "displayPrice": price,
+                                                "publishTime": publish, "id": "1"}},
+                        "targetUrl": url,
+                    }
+                }
+            },
+        }
+
+    payload = {"ret": ["SUCCESS::调用成功"], "data": {"resultList": [
+        node("华硕TUF RTX4090 24G OC Gaming显卡 成色99新", "20499"),
+        node("微星4090超龙 原盒原码", "23000", area="山西",
+             url="fleamarket://item?id=999&referPageArgs=RTX+4090"),
+    ]}}
+
+    rows = X.parse_search_payload(payload)
+    check("闲鱼接口：解析出 2 条", len(rows) == 2, f"实际 {len(rows)}")
+    if rows:
+        r = rows[0]
+        check("闲鱼接口：价格取**接口定价**（不是渲染文本，无需拆行拼装）",
+              r["price"] == 20499.0, f"实际 {r['price']}")
+        check("闲鱼接口：标题正确", r["title"].startswith("华硕TUF RTX4090"), r["title"][:30])
+        check("闲鱼接口：fleamarket:// 归一到 https",
+              r["item_url"].startswith("https://www.goofish.com/"), r["item_url"][:60])
+        check("闲鱼接口：拿到发布时间（DOM 上取不到）",
+              r["publish_time"] == "1790871637000", r["publish_time"])
+        check("闲鱼接口：拿到地区（DOM 上取不到）", r["area"] == "广东", r["area"])
+        check("链接归一：商品页只保留 id（非跟踪参数也要去掉）",
+          N.normalize_url("https://www.goofish.com/item?id=999&foo=bar") ==
+          "https://www.goofish.com/item?id=999",
+          N.normalize_url("https://www.goofish.com/item?id=999&foo=bar"))
+
+    check("闲鱼接口：跟踪参数被去掉但保留 id",
+              "id=999" in rows[1]["item_url"] and "referPageArgs" not in rows[1]["item_url"],
+              rows[1]["item_url"])
+
+    # ---- 脏数据 / 边界：单条坏数据不能毁掉整页 ----
+    dirty = {"data": {"resultList": [
+        None,
+        "not a dict",
+        {"data": {"item": {"main": {"exContent": {}, "clickParam": {"args": {}}}}}},
+        node("正常的一条", "1200"),
+        {"data": {"item": {"main": {"exContent": {"title": "没有价格"},
+                                    "clickParam": {"args": {}}}}}},
+        # ⚠️ 下面这条是**区分度用例**：没有标题但有合法价格。
+        #    没有它，标题守卫被去掉也测不出来（上面那条既没标题也没价格，
+        #    会被价格守卫顺手挡掉）。
+        {"data": {"item": {"main": {
+            "exContent": {"title": "  ", "area": "北京"},
+            "clickParam": {"args": {"price": "1234", "id": "7"}},
+            "targetUrl": "fleamarket://item?id=7",
+        }}}},
+    ]}}
+    rows2 = X.parse_search_payload(dirty)
+    check("闲鱼接口：脏数据被跳过、好数据保留", len(rows2) == 1,
+          f"实际 {len(rows2)} 条")
+
+    # ⚠️ 实测：同一份响应里既有 fleamarket:// 也有**加密的不透明串**。
+    #    拿不到合法 URL 时必须用 item_id 自己拼，否则链接不可用、去重键被污染。
+    opaque = {"data": {"resultList": [
+        node("加密链接的商品", "8888", url="z9xpXnwzz6eu3JHQFPK2nb4PAGLvMlrcMmtt="),
+        node("链接为空但有 id 的商品", "6666", url=""),
+    ]}}
+    rows3 = X.parse_search_payload(opaque)
+    check("闲鱼接口：加密 targetUrl 不原样当链接用",
+          all("z9xpXnwzz" not in r["item_url"] for r in rows3),
+          str([r["item_url"] for r in rows3]))
+    check("闲鱼接口：拿不到 URL 时用 item_id 拼出商品页链接",
+          len(rows3) == 2 and all(
+              r["item_url"] == "https://www.goofish.com/item?id=1" for r in rows3),
+          str([r["item_url"] for r in rows3]))
+
+    check("链接归一：非 URL 一律返回空串（不透明串不能当链接）",
+          N.normalize_url("z9xpXnwzz6eu3JHQFPK2nb4PAGLvMlrcMmtt=") == ""
+          and N.normalize_url("") == "" and N.normalize_url(None) == "")
+
+    # ⚠️ 实测：同一份响应里既有 fleamarket:// 也有**加密的不透明串**。
+    #    拿不到合法 URL 时必须用 item_id 自己拼，否则链接不可用、去重键被污染。
+    opaque = {"data": {"resultList": [
+        node("加密链接的商品", "8888", url="z9xpXnwzz6eu3JHQFPK2nb4PAGLvMlrcMmtt="),
+        node("链接为空但有 id 的商品", "6666", url=""),
+    ]}}
+    rows3 = X.parse_search_payload(opaque)
+    check("闲鱼接口：加密 targetUrl 不原样当链接用",
+          all("z9xpXnwzz" not in r["item_url"] for r in rows3),
+          str([r["item_url"] for r in rows3]))
+    check("闲鱼接口：拿不到 URL 时用 item_id 拼出商品页链接",
+          len(rows3) == 2 and all(
+              r["item_url"] == "https://www.goofish.com/item?id=1" for r in rows3),
+          str([r["item_url"] for r in rows3]))
+
+    check("链接归一：非 URL 一律返回空串（不透明串不能当链接）",
+          N.normalize_url("z9xpXnwzz6eu3JHQFPK2nb4PAGLvMlrcMmtt=") == ""
+          and N.normalize_url("") == "" and N.normalize_url(None) == "")
+
+    check("闲鱼接口：空/残缺载荷返回空表而不是抛异常",
+          X.parse_search_payload(None) == []
+          and X.parse_search_payload({}) == []
+          and X.parse_search_payload({"data": {}}) == []
+          and X.parse_search_payload({"data": {"resultList": None}}) == [])
+
+    # ---- 回落保障：接口路径与 DOM 路径必须**同时存在** ----
+    import pathlib as _pl
+    src = _pl.Path("app/collectors/xianyu_source.py").read_text(encoding="utf-8")
+    check("闲鱼：调用接口解析（主路径）", "parse_search_payload(captured" in src)
+    check("闲鱼：保留 DOM 兜底（接口失效时不至于整源归零）",
+          "def _rows_from_dom" in src and "page.evaluate(_EXTRACT_JS)" in src)
+    check("闲鱼：确实挂了响应监听（否则截获形同虚设）",
+          'page.on("response", _on_response)' in src)
+    check("闲鱼：监听回调按接口名过滤（不能什么响应都当搜索结果）",
+          "SEARCH_API_MARK not in resp.url" in src)
+    check("闲鱼：排除 `.shade` 装饰接口（它没有 resultList，会覆盖真结果）",
+          "SEARCH_API_MARK + \".shade\"" in src)
+    check("闲鱼：响应监听器用完即摘（否则多型号会重复解析 300KB）",
+          "remove_listener" in src)
+    check("闲鱼：渲染价格拼装仍在兜底路径里（2.30万 不会被记成 2）",
+          "normalize.parse_split_price" in src)
+
 
 def test_registry_is_clean() -> None:
     """元守卫：测试注册表与定义必须一一对应。
@@ -2846,6 +3016,7 @@ def test_registry_is_clean() -> None:
 
 def main() -> int:
     tests = (
+        test_xianyu_api_parse,
         test_registry_is_clean,
         test_price_normalization,
         test_browser_proxy_policy,

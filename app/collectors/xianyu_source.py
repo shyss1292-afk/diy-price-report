@@ -86,6 +86,71 @@ _EXTRACT_JS = r"""() => {
     return out;
 }"""
 
+SEARCH_API_MARK = "mtop.taobao.idlemtopsearch.pc.search"
+
+
+def parse_search_payload(payload) -> list[dict]:
+    """把闲鱼搜索接口的响应解析成行。
+
+    结构（实测 2026-10-02，`resultList` 30 条）：
+
+        data.resultList[i].data.item.main
+            ├─ exContent.title / .area / .itemId / .picUrl
+            ├─ clickParam.args.price / .displayPrice / .publishTime / .id
+            └─ targetUrl   （fleimarket://item?id=...）
+
+    为什么值钱：这是**平台的对外契约**，不是渲染结果 —— 类名改版不影响它，
+    而且能拿到 DOM 上看不到的字段（发布时间 / 地区 / 商品 id）。
+
+    ⚠️ 这里的 price 是接口给的定价，是**完整数值** —— 不需要
+       `parse_split_price` 那套拆行拼装（那是 DOM 兜底路径才需要的）。
+    """
+    out: list[dict] = []
+    if not isinstance(payload, dict):
+        return out
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return out
+
+    for node in data.get("resultList") or []:
+        try:
+            main = (((node or {}).get("data") or {}).get("item") or {}).get("main") or {}
+            ex = main.get("exContent") or {}
+            args = (main.get("clickParam") or {}).get("args") or {}
+
+            title = str(ex.get("title") or "").strip()
+            if not title:
+                continue
+
+            price = normalize.parse_price(args.get("price") or args.get("displayPrice"))
+            if price is None:
+                continue
+
+            item_id = str(args.get("id") or ex.get("itemId") or "")
+
+            # 商品链接优先用 targetUrl，但它**不总是可信** —— 实测同一份响应里
+            # 既有 `fleamarket://item?id=...` 也有加密的不透明串。
+            # 所以拿不到合法 URL 时，用 item_id **自己拼** —— 这是确定性的，
+            # 不依赖任何可能被替换的字段。
+            item_url = normalize.normalize_url(main.get("targetUrl") or "")
+            if not item_url and item_id:
+                item_url = f"https://www.goofish.com/item?id={item_id}"
+
+            out.append(
+                {
+                    "title": title,
+                    "price": price,
+                    "item_url": item_url,
+                    "publish_time": str(args.get("publishTime") or ""),
+                    "area": str(ex.get("area") or ""),
+                    "item_id": item_id,
+                }
+            )
+        except Exception:  # noqa: BLE001 —— 单条脏数据不该毁掉整页
+            continue
+    return out
+
+
 _NEW_KEYWORDS = ("全新", "未拆封", "未拆", "仅拆封", "全新未使用")
 
 
@@ -149,56 +214,88 @@ class XianyuCollector(BaseCollector):
 
     def _search(self, page, product) -> list[Quote]:
         url = SEARCH_URL.format(kw=urllib.parse.quote(product.model))
+
+        # ---- 响应截获：页面自己会调 mtop 搜索接口，我们直接接住它的 JSON ----
+        #
+        # 为什么不解析 DOM：DOM 是**渲染结果**，类名与层级每次发版都可能变；
+        # 而接口是平台的**对外契约**，字段还更全（发布时间 / 地区 / 商品 id）。
+        # 实测该接口返回约 300 KB 明文 JSON、resultList 30 条。
+        #
+        # ⚠️ 监听器必须**用完即摘**：run_browser_batch 在同一个 page 上连续搜
+        #    多个型号，不摘除的话 15 个型号就挂 15 个监听器，每次响应都要
+        #    重复解析 300 KB。
+        captured: dict = {}
+
+        def _on_response(resp) -> None:
+            try:
+                if SEARCH_API_MARK not in resp.url:
+                    return
+                if SEARCH_API_MARK + ".shade" in resp.url:
+                    return          # 这是"搜索页装饰"接口，不是结果列表
+                captured["data"] = resp.json()
+            except Exception:  # noqa: BLE001 —— 监听失败绝不能影响采集
+                pass
+
+        page.on("response", _on_response)
         try:
-            # navigate 按平台策略导航并先查一次限流（闲鱼惩罚页是 `punish` 页）。
-            # RateLimitError 是熔断信号，原样上抛，不在这里吞掉。
-            policy.navigate(page, url, self.code, timeout=self.page_timeout)
-        except policy.RateLimitError:
-            raise
-        except Exception as exc:
-            # ⚠️ 「页面/浏览器已关闭」**不能**被吞成"搜索失败"。
-            # 吞掉之后 run_browser_batch 会把它当成"搜索无结果"累加 empty_streak，
-            # 连续 3 次就**误判为被限流**并提前结束本轮 —— 实测 2026-10-01 20:30
-            # 闲鱼一轮 15 个型号只采到 1 个就"判定限流"退出，真凶其实是浏览器实例挂了。
-            # 原样上抛，让上层走 mark_dirty + 重建实例（重建只要约 3 秒）。
-            if page_dead(exc):
+            try:
+                # navigate 按平台策略导航并先查一次限流（闲鱼惩罚页是 `punish` 页）。
+                # RateLimitError 是熔断信号，原样上抛，不在这里吞掉。
+                policy.navigate(page, url, self.code, timeout=self.page_timeout)
+            except policy.RateLimitError:
                 raise
-            logger.warning("%s搜索失败 %s：%s", "闲鱼", product.model, exc)
-            return []
+            except Exception as exc:
+                # ⚠️ 「页面/浏览器已关闭」**不能**被吞成"搜索失败"。
+                # 吞掉之后 run_browser_batch 会把它当成"搜索无结果"累加
+                # empty_streak，连续 3 次就**误判为被限流**并提前结束本轮 ——
+                # 实测 2026-10-01 20:30 闲鱼一轮 15 个型号只采到 1 个就"判定限流"
+                # 退出，真凶其实是浏览器实例挂了。原样上抛，让上层走 mark_dirty
+                # + 重建实例（重建只要约 3 秒）。
+                if page_dead(exc):
+                    raise
+                logger.warning("%s搜索失败 %s：%s", "闲鱼", product.model, exc)
+                return []
 
-        # 闲鱼是单页应用，没有可靠的服务端渲染信号，保留一个显式首屏等待
-        page.wait_for_timeout(self.page_wait_ms)
-        try:  # 滚动触发懒加载
-            page.evaluate(f"() => window.scrollTo(0, {self.scroll_pixels})")
-            page.wait_for_timeout(2500)
-        except Exception:
-            pass
+            # 闲鱼是单页应用，没有可靠的服务端渲染信号，保留一个显式首屏等待
+            page.wait_for_timeout(self.page_wait_ms)
+            try:  # 滚动触发懒加载
+                page.evaluate(f"() => window.scrollTo(0, {self.scroll_pixels})")
+                page.wait_for_timeout(2500)
+            except Exception:
+                pass
 
-        # 行为模拟：闲鱼对"鼠标是否有真实位移"较敏感，
-        # 光标从头到尾停在 (0,0) 本身就是脚本特征
-        policy.behave(page, self.code)
-        policy.settle(page, self.code)
-        policy.assert_not_rate_limited(page, self.code)
+            # 行为模拟：闲鱼对"鼠标是否有真实位移"较敏感，
+            # 光标从头到尾停在 (0,0) 本身就是脚本特征
+            policy.behave(page, self.code)
+            policy.settle(page, self.code)
+            policy.assert_not_rate_limited(page, self.code)
 
-        try:
-            rows = page.evaluate(_EXTRACT_JS)
-        except Exception as exc:
-            # ⚠️ 和 _search 同理：页面/浏览器已关闭不能被吞成"解析失败"。
-            # 吞掉会累加 empty_streak，连续 3 次就误判为限流 —— 方向指反。
-            if page_dead(exc):
-                raise
-            logger.warning("闲鱼解析失败 %s：%s", product.model, exc)
-            return []
+            rows = parse_search_payload(captured.get("data"))
+        finally:
+            try:
+                page.remove_listener("response", _on_response)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if rows:
+            logger.info(
+                "闲鱼 %s 命中搜索接口：%d 条（含发布时间/地区/商品链接）",
+                product.model, len(rows),
+            )
+        else:
+            # 接口没拿到（改版/被降级/超时）→ 回落 DOM。
+            # **两条路都留着**，任何一条断了都不至于整源归零。
+            rows = self._rows_from_dom(page, product)
+            if rows:
+                logger.info(
+                    "闲鱼 %s 接口未命中，回落 DOM 解析：%d 条", product.model, len(rows),
+                )
 
         quotes: list[Quote] = []
-        for row in rows or []:
-            # 价格在页面上可能被拆成多行（¥ / 2 / .30 / 万），
-            # 由 priceSeg 拼装 —— 拼装逻辑在 collectors/normalize.py（可单测）
-            price = normalize.parse_split_price(row.get("priceSeg"))
-            if price is None:
-                continue
+        for row in rows:
             title = (row.get("title") or "").strip()
-            if price <= 0 or len(title) < 4:
+            price = row.get("price")
+            if not title or len(title) < 4 or not price or price <= 0:
                 continue
             quotes.append(
                 Quote(
@@ -206,9 +303,37 @@ class XianyuCollector(BaseCollector):
                     title_raw=title[:200],
                     price=price,
                     condition=_condition_of(title),
-                    url=url,
-                    seller="闲鱼卖家",
-                    extra={"category": product.category, "keyword": product.model},
+                    # 接口给的是**商品页**链接（fleamarket:// 已归一为 https），
+                    # 比"搜索页 URL"有用得多 —— 也是商品级去重键的基础
+                    url=(row.get("item_url") or url),
+                    seller=(row.get("seller") or "闲鱼卖家"),
+                    extra={
+                        "category": product.category,
+                        "keyword": product.model,
+                        "publish_time": row.get("publish_time") or "",
+                        "area": row.get("area") or "",
+                    },
                 )
             )
         return quotes
+
+    def _rows_from_dom(self, page, product) -> list[dict]:
+        """DOM 兜底：接口不可用时仍能取到数（类名无关的纯文本锚点）。"""
+        try:
+            dom = page.evaluate(_EXTRACT_JS)
+        except Exception as exc:
+            # ⚠️ 与 _search 同理：页面已关闭不能被吞成"解析失败"，
+            # 吞掉会累加 empty_streak，连续 3 次就误判为限流 —— 方向指反。
+            if page_dead(exc):
+                raise
+            logger.warning("闲鱼解析失败 %s：%s", product.model, exc)
+            return []
+        rows: list[dict] = []
+        for r in dom or []:
+            # 价格在页面上可能被拆成多行（¥ / 2 / .30 / 万），
+            # 拼装逻辑在 collectors/normalize.py（可单测）
+            price = normalize.parse_split_price(r.get("priceSeg"))
+            if price is None:
+                continue
+            rows.append({"title": (r.get("title") or "").strip(), "price": price})
+        return rows

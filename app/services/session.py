@@ -392,6 +392,23 @@ def build_launch_args(
     #       实测卡片数 33→3（-91%），而内存只省约 10%（在噪声范围内）——
     #       代价与收益严重不成比例
     #
+    #   --disable-background-timer-throttling / --disable-renderer-backgrounding
+    #   --disable-backgrounding-occluded-windows
+    #       这三个是"防止页面被判定为后台后降频"。看名字很有针对性 ——
+    #       我们确实把窗口挪到屏幕外（--window-position）并用 hide_browser_app()
+    #       把整个 App 隐藏了，理论上会触发 Chromium 的后台节流。
+    #       **实测否决**（2026-10-02，scripts/throttle_eval.py，零平台请求）：
+    #           变体                定时器触发   rAF帧   页面耗时/墙钟
+    #           现状（不加）            190      242     8020 / 8019 ms
+    #           只加 timer-throttling   190      242     8019 / 8018 ms
+    #           三个都加                190      241     8010 / 8012 ms
+    #           现状复测                191      241     8024 / 8031 ms
+    #       20ms 定时器链跑 4 秒应触发约 200 次 —— 四组都是 190 次，**没有节流**；
+    #       且 visibilityState=visible、hasFocus=true（离屏窗口在 Chrome 眼里仍是可见的）。
+    #       另外用耗时算术也能佐证：闲鱼单型号 26s ≈ 固定开销(navigate 9s +
+    #       滚动 2.5s + settle 2s) + 策略间隔(gauss(9,3)≈9s) + 长停顿概率折算 2.6s
+    #       ≈ 25s —— 与实测吻合，**没有无法解释的延迟**。
+    #       结论：加了纯属噪声。复现用 python -m scripts.throttle_eval。
     #   --disable-dev-shm-usage
     #       这是 **Linux 专属**参数（改 /dev/shm 用量），macOS 上是空操作。
     #       本项目跑在 macOS，加了只会让人以为优化过。
