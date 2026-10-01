@@ -2975,6 +2975,75 @@ def test_xianyu_api_parse() -> None:
           "normalize.parse_split_price" in src)
 
 
+def test_dedupe_identity() -> None:
+    """去重身份键：优先商品链接，拿不到链接必须**回落**。
+
+    守住的坑：
+      · 卖家改标题 → 同一件商品被当新条目（链接能解决）
+      · 反过来更危险：京东/拼多多的 url 是**搜索页 URL**，若不给回落，
+        整个型号的 30 条报价会被合并成 1 条 —— 灾难级错误。
+    """
+    from app.collectors.base import Quote, dedupe_quotes, quote_identity
+
+    ITEM_A = "https://www.goofish.com/item?id=111"
+    ITEM_B = "https://www.goofish.com/item?id=222"
+    SEARCH = "https://www.goofish.com/search?q=RTX+4090"
+
+    def q(title, price, url, plat="xianyu"):
+        return Quote(platform_code=plat, title_raw=title, price=price, url=url)
+
+    # ---- ① 链接优先：同链接但标题/价格不同 → 仍视为同一件商品 ----
+    same_item = [
+        q("华硕4090 猛禽", 23000, ITEM_A),
+        q("华硕4090 猛禽 包邮 可小刀", 23000, ITEM_A),   # 卖家改了标题
+        q("华硕RTX4090", 22900, ITEM_A),                  # 卖家改了价
+    ]
+    check("同一商品链接 → 只保留 1 条（改标题/改价都算同一件）",
+          len(dedupe_quotes(same_item)) == 1,
+          f"实际 {len(dedupe_quotes(same_item))} 条")
+
+    # ---- ② 不同链接即使标题价格都一样 → 是两件商品，都要留 ----
+    diff_items = [q("全新 4090", 19999, ITEM_A), q("全新 4090", 19999, ITEM_B)]
+    check("不同商品链接 → 保留 2 条（同价同标题也是两件货）",
+          len(dedupe_quotes(diff_items)) == 2,
+          f"实际 {len(dedupe_quotes(diff_items))} 条")
+
+    # ---- ③ 回落：搜索页 URL（京东/拼多多现状）→ 行为与改前一致 ----
+    fallback_same = [
+        q("七彩虹 5070", 4599, SEARCH),
+        q("七彩虹 5070", 4599, SEARCH),
+    ]
+    check("无商品链接时回落文本键 → 完全重复的仍被去掉",
+          len(dedupe_quotes(fallback_same)) == 1)
+
+    fallback_diff = [
+        q("七彩虹 5070", 4599, SEARCH),
+        q("影驰 5070", 4599, SEARCH),
+        q("七彩虹 5070", 4699, SEARCH),
+    ]
+    check("无商品链接时**不会误合并**不同标题/价格（否则整个型号被并成 1 条）",
+          len(dedupe_quotes(fallback_diff)) == 3,
+          f"实际 {len(dedupe_quotes(fallback_diff))} 条")
+
+    # ---- ④ 身份键本身：两类前缀必须可区分 ----
+    check("身份键：有链接用 link: 前缀",
+          quote_identity("xianyu", "t", 1, ITEM_A).startswith("link:"))
+    check("身份键：无链接用 text: 前缀（且含平台，避免跨平台误合并）",
+          quote_identity("jd", "t", 1, SEARCH).startswith("text:jd|"))
+    check("身份键：同链接不同输入产出同一键",
+          quote_identity("xianyu", "a", 1, ITEM_A + "&spm=x") ==
+          quote_identity("xianyu", "b", 2, ITEM_A))
+
+    # ---- ⑤ 规则只有一份实现（不允许两处各写一套）----
+    import pathlib as _pl
+    base_src = _pl.Path("app/collectors/base.py").read_text(encoding="utf-8")
+    tq_src = _pl.Path("app/services/task_queue.py").read_text(encoding="utf-8")
+    check("落盘读回与内存去重共用同一身份键实现",
+          "quote_identity(" in base_src and "quote_identity(" in tq_src)
+    check("task_queue 从 base 导入该实现（而不是自己再写一份）",
+          "from ..collectors.base import Quote, quote_identity" in tq_src)
+
+
 def test_registry_is_clean() -> None:
     """元守卫：测试注册表与定义必须一一对应。
 
@@ -3016,6 +3085,7 @@ def test_registry_is_clean() -> None:
 
 def main() -> int:
     tests = (
+        test_dedupe_identity,
         test_xianyu_api_parse,
         test_registry_is_clean,
         test_price_normalization,

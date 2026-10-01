@@ -320,14 +320,14 @@ def load_quotes(source: str, day: str, task_ids: set[str] | None = None) -> list
     Args:
         task_ids: 只取这些任务的（None 表示全部）
     """
-    from ..collectors.base import Quote
+    from ..collectors.base import Quote, quote_identity
 
     path = _result_file(source, day)
     if not path.exists():
         return []
 
     out: list[Quote] = []
-    seen: set[tuple] = set()
+    seen: set[str] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -339,8 +339,15 @@ def load_quotes(source: str, day: str, task_ids: set[str] | None = None) -> list
         if task_ids is not None and row.get("task_id") not in task_ids:
             continue
         payload = row.get("quote") or {}
-        # 去重：同一型号可能因重试被写了两次
-        key = (payload.get("platform_code"), payload.get("title_raw"), payload.get("price"))
+        # 去重：同一型号可能因重试被写了两次。
+        # ⚠️ 必须与 `base.dedupe_quotes` 用**同一个**身份键 —— 否则
+        #    "落盘时按链接去重、读回时按标题去重"会得出不同结果。
+        key = quote_identity(
+            payload.get("platform_code"),
+            payload.get("title_raw"),
+            payload.get("price"),
+            payload.get("url", ""),
+        )
         if key in seen:
             continue
         seen.add(key)

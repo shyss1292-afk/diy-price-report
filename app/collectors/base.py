@@ -328,12 +328,40 @@ def should_reset_backoff(quote_count: int, aborted: bool, suspect_throttle: bool
     return int(quote_count or 0) > 0 and not aborted and not suspect_throttle
 
 
+def quote_identity(
+    platform_code: str, title_raw: str, price: object, url: str = ""
+) -> str:
+    """一条报价的**身份键** —— 全项目唯一实现。
+
+    优先用**商品链接**：同一件商品，卖家改个标题（加"包邮"、改空格）它还是它；
+    用标题当键的话，每次改标题都会变成"新条目"，同一件商品被重复计入，
+    日低价与均价都被拉偏。链接里的 item id 才是身份。
+
+    ⚠️ 必须带**回落**：京东/拼多多的 `Quote.url` 目前存的还是**搜索页 URL**，
+    `link_key()` 对它们返回空串。此时若不做回落，同一个型号的 30 条报价会被
+    合并成 1 条 —— 那是灾难级的错。所以拿不到链接就退回原来的
+    (平台, 标题, 价格) 键，行为与改前**完全一致**。
+
+    拼成字符串（而不是元组）是为了让两处调用方（`base.dedupe_quotes`
+    与 `task_queue.load_quotes`）共用同一份逻辑 —— 规则各写一套迟早会漂移。
+    """
+    from . import normalize
+
+    link = normalize.link_key(url or "")
+    if link:
+        return f"link:{link}"
+    return f"text:{platform_code}|{title_raw}|{price}"
+
+
 def dedupe_quotes(quotes: list[Quote]) -> list[Quote]:
-    """按 (平台, 标题, 价格) 去重 —— 重试与崩溃恢复都可能带来重复。"""
+    """去重 —— 重试与崩溃恢复都可能带来重复。
+
+    键由 `quote_identity()` 给出（优先商品链接，无链接回落文本键）。
+    """
     out: list[Quote] = []
-    seen: set[tuple] = set()
+    seen: set[str] = set()
     for q in quotes:
-        key = (q.platform_code, q.title_raw, q.price)
+        key = quote_identity(q.platform_code, q.title_raw, q.price, q.url)
         if key in seen:
             continue
         seen.add(key)
