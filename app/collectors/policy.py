@@ -119,6 +119,36 @@ class ThrottlePolicy:
     # **让它可被监控**：worker 借页时发现context 里还有别的活动页会告警。
     allow_multi_tab: bool = False
 
+    def __post_init__(self) -> None:
+        """在**入口**拒绝会误伤的限流特征 —— 而不是等它在生产里误熔断。
+
+        `detect_rate_limit()` 对「标题 + 整页正文」做的是朴素子串匹配，而
+        正文里全是商品信息。所以特征串必须"自带语境"才能用。
+
+        🐞 2026-10-01 的真实事故（此守卫就是为它加的）
+        ------------------------------------------------
+        PDD 的特征表里曾有一条**裸数字** `"40001"`，本意是匹配错误码。结果：
+
+            23:31:33 拼多多 触发限流熔断：命中「40001」：
+                     …i9-14900K/128G/1TSSD /RTXA400016G 仅剩5件…¥ 35000 56人想拼
+
+        `40001` 命中在正文第 40 字符，上下文是 `/RTXA400016G` —— 显卡型号
+        **RTX A4000 16G**，"A4000" + "16G" 拼出了 `40001`。那一页其实是
+        **正常的搜索结果页**（有价格、有"56人想拼"）。当天因此误熔断 2 次，
+        每次都中止整批，并**推进软风控退避阶梯**（15分 → 2小时 → 4小时）。
+
+        所以：**纯数字特征一律禁止**。错误码要匹配就带上它的键名
+        （如 `error_code=40001`），或者放进 `rate_limit_url_patterns`
+        只在 URL 上匹配 —— URL 上没有商品正文，不存在这种碰撞。
+        """
+        for indicator in self.rate_limit_indicators:
+            if indicator.isdigit():
+                raise ValueError(
+                    f"[{self.code}] 限流特征 {indicator!r} 是裸数字 —— "
+                    "会被正文里的商品型号撞上（实测：'RTXA400016G' 命中 '40001'）。"
+                    "请改带键名的形式（error_code=40001），或放进 rate_limit_url_patterns。"
+                )
+
     def describe(self) -> str:
         return (
             f"{self.label}: 间隔 {self.delay_floor:.0f}~{self.delay_ceil:.0f}s"
@@ -229,15 +259,18 @@ PDD = ThrottlePolicy(
     mouse_jitter=(60, 140),
     hover_ms=(500, 1200),
     settle_ms=(700, 1400),
-    rate_limit_indicators=(
-        "error_code=40001",
-        "40001",
-        "系统繁忙",
-        "请稍后再试",
-        "安全验证",
-        "滑动验证",
-        "访问异常",
-    ),
+       rate_limit_indicators=(
+           "error_code=40001",
+           # 🚫 这里曾有第二条裸数字 "40001"，2026-10-01 已删除 —— 它会命中
+           #    正文里显卡型号 "RTXA400016G"（RTX A4000 16G），当天误熔断 2 次。
+           #    错误码的 URL 形式已由 rate_limit_url_patterns 覆盖；
+           #    ThrottlePolicy.__post_init__ 现在会**拒绝**任何纯数字特征。
+           "系统繁忙",
+           "请稍后再试",
+           "安全验证",
+           "滑动验证",
+           "访问异常",
+       ),
     rate_limit_url_patterns=(
         "verify",
         "error_code=40001",

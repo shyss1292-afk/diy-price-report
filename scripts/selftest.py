@@ -317,11 +317,13 @@ def test_rate_limit_detection() -> None:
         ("xianyu", _FakePage("https://www.goofish.com/search", "",
                              "非法访问 为了保障您的体验，请使用正常浏览器访问闲鱼~"),
          "非法访问", "闲鱼拦截文案（实测出现过）"),
-        # 指标表里 `error_code=40001` 排在裸 `40001` 之前，命中的是更具体的那个
-        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", '{"error_code=40001"}'),
-         "error_code=40001", "拼多多错误码"),
-        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", "访问异常 40001"),
-         "40001", "拼多多裸错误码"),
+        # ⚠️ 这条用例原来写的是「正文含裸 40001 → 期望命中 '40001'」，
+        #    **它把 bug 钉死了**：正文里出现 40001 恰恰是误判的来源。
+        #    2026-10-01 改为真实形态 —— 错误码出现在 URL 上。
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/psnl_verification.html?error_code=40001"),
+         "error_code=40001", "拼多多验证页（错误码在 URL 上）"),
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/x", "", '{"ret":"FAIL","error_code=40001"}'),
+         "error_code=40001", "拼多多 JSON 错误码（带键名）"),
         ("pdd", _FakePage("https://mobile.yangkeduo.com/verify.html"), "verify", "拼多多验证页"),
         ("pdd", _FakePage("https://mobile.yangkeduo.com/login.html"), "login.html", "被踢到登录页"),
     ]
@@ -347,6 +349,17 @@ def test_rate_limit_detection() -> None:
                              "闲鱼 搜索 RTX 5070 显卡 九成新 ¥1899 包邮 我想要 宝贝详情")),
         ("pdd", _FakePage("https://mobile.yangkeduo.com/search_result.html?search_key=x",
                           "拼多多", "拼多多 搜索 显卡 ¥2688 已拼10万件 单独购买 发起拼单")),
+        # 🐞 2026-10-01 真实误熔断的原文（data/collect.log 23:31:33）：
+        #    正文里 "RTXA400016G"（显卡型号 RTX A4000 16G）包含子串 "40001"，
+        #    被当成了拼多多错误码 → 整批中止 + 推进退避阶梯。
+        #    这是一页**正常搜索结果**（有价格、有"56人想拼"），绝不能判限流。
+        ("pdd", _FakePage("https://mobile.yangkeduo.com/search_result.html?search_key=i9-14900K",
+                          "拼多多",
+                          "想P3图形工作站台式机升级i9-14900K/128G/1TSSD /RTXA400016G 仅剩5件 "
+                          "24小时内发货 假一赔十 ¥ 35000 56人想拼 "
+                          "英特尔(Intel)酷睿14代 i9处理器14900K 24核32线程 五年质保")),
+        ("xianyu", _FakePage("https://www.goofish.com/search?q=A4000", "闲鱼",
+                             "RTX A4000 16G 专业卡 ¥3999 56人想要 广州 全新")),
     ]
     false_alarms = []
     for code, page in negatives:
@@ -354,6 +367,24 @@ def test_rate_limit_detection() -> None:
         if hit:
             false_alarms.append(f"{code}: 误判为「{hit[0]}」")
     check("真阴性：正常商品页不会被误判为限流", not false_alarms, "; ".join(false_alarms))
+
+    # ---- 结构守卫：裸数字特征一律不允许（钉住**这一类**，不只是一个 PDD）----
+    #     真正的闸门在 ThrottlePolicy.__post_init__，这里验证那道闸门会拦。
+    bad_digits = [
+        (code, ind)
+        for code, pol in policy.PLATFORM_THROTTLE_CONFIG.items()
+        for ind in pol.rate_limit_indicators
+        if ind.isdigit()
+    ]
+    check("没有任何平台使用「纯数字」限流特征（会被商品型号撞上）",
+          not bad_digits, f"实际 {bad_digits}")
+
+    try:
+        policy.ThrottlePolicy(code="t", label="测试", rate_limit_indicators=("40001",))
+        guard_raised = False
+    except ValueError:
+        guard_raised = True
+    check("构造期就拒绝裸数字特征（把 bug 挡在入口，而不是等它误熔断）", guard_raised)
 
     # 异常页面（取不到标题/正文）不应崩，也不应误报
     class _BrokenPage:
