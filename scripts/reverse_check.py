@@ -55,6 +55,7 @@ SEED = PROJ / "app/seed_data.py"
 ROUTES = PROJ / "app/api/routes.py"
 SERVICE = PROJ / "scripts/service.sh"
 PDD = PROJ / "app/collectors/pdd_source.py"
+JD = PROJ / "app/collectors/jd_source.py"
 BASE = PROJ / "app/collectors/base.py"
 SESSION = PROJ / "app/services/session.py"
 WORKER = PROJ / "app/services/browser_worker.py"
@@ -371,7 +372,43 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         '    if resource_type == "image":\n        return False',
         '    if resource_type == "image":\n        return True',
     ),
-]
+    (
+        "限流特征正文匹配退回大小写敏感（大写特征静默失效）",
+        BREAKER.replace("breaker.py", "policy.py"),
+        "    probe_lower = probe.lower()\n",
+        "    probe_lower = probe\n",
+    ),
+    (
+        "京东不再挂响应监听（截获形同虚设，退回 DOM）",
+        JD,
+        '        page.on("response", _on_response)\n',
+        "        pass\n",
+    ),
+    (
+        "京东监听器不摘（多型号重复解析 300KB）",
+        JD,
+        '                page.remove_listener("response", _on_response)\n',
+        "                pass\n",
+    ),
+    (
+        "京东解析器不剥 HTML 标签（标题带 <font> 污染去重）",
+        JD,
+        '    return re.sub(r"<[^>]+>", "", text or "")\n',
+        "    return text or \"\"\n",
+    ),
+    (
+        "京东价格退到「到手价」顶替展示价（口径污染）",
+        JD,
+        '    for key in ("jdPrice", "realPrice"):\n',
+        '    for key in ():\n',
+    ),
+    (
+        "京东去掉体积下限（AB 配置 7KB 会被当成商品列表）",
+        JD,
+        "                if len(body) < _MIN_PAYLOAD_BYTES:\n",
+        "                if False:\n",
+    ),
+
 
 
 def _run_selftest() -> tuple[int, int]:

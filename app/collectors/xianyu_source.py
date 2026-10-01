@@ -314,6 +314,11 @@ class XianyuCollector(BaseCollector):
                         "keyword": product.model,
                         "publish_time": row.get("publish_time") or "",
                         "area": row.get("area") or "",
+                        # 实测 2026-10-02：`parse_search_payload` 解析出了 item_id，
+                        # 但构造 Quote 时被丢掉了（只用来拼 URL）。它是去重键与
+                        # 排障的**原始身份** —— 没有它，"同一商品为什么算了两次"
+                        # 就无从对照。
+                        "item_id": row.get("item_id") or "",
                     },
                 )
             )

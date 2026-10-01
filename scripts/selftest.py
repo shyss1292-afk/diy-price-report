@@ -3245,6 +3245,108 @@ def test_backoff_decay_and_floor() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_jd_payload_and_policy_case() -> None:
+    """京东响应截获 + 策略大小写 + 三处核验过的缺陷（2026-10-02）。
+
+    守住的是本轮实测纠正的错误结论：京东**不是** SSR，商品在
+    `api.m.jd.com/api?appid=search-pc-java` 的明文 JSON 里。
+    """
+    import json
+
+    from app.collectors import normalize as _N
+    from app.collectors import policy as _pol
+    from app.collectors.jd_source import _price_of, parse_search_payload
+
+    def _item(ware: str, name: str, price: str, **kw):
+        d = {"wareId": ware, "wareName": name, "jdPrice": price, "oriPrice": price,
+             "realPrice": price, "shopName": "某店", "stock": 1}
+        d.update(kw)
+        return d
+
+    good = [_item(str(1000 + i), f"影驰RTX5070显卡{i} 12G", f"{6000 + i}.00")
+            for i in range(10)]
+
+    # ---- 载荷形态：外层 data 是 JSON 字符串（真实形态）/ 裸数组 / 纯埋点 ----
+    cases = [
+        ("data 是 JSON 字符串（京东真实形态）",
+         {"abBuriedTagMap": {"x": "y"}, "code": 0, "data": json.dumps(good)}, 10),
+        ("外层直接是数组", good, 10),
+        ("纯埋点载荷没有商品数组", {"abBuriedTagMap": {"a": 1}, "code": 0}, 0),
+        ("空载荷", {}, 0),
+        ("条数不足 _PRODUCT_MIN", {"data": good[:3]}, 0),
+    ]
+    bad = [f"{lab}: 期望 {exp} 实际 {len(parse_search_payload(pl))}"
+           for lab, pl, exp in cases if len(parse_search_payload(pl)) != exp]
+    check(f"京东载荷解析（{len(cases)} 种形态）", not bad, "; ".join(bad))
+
+    # ---- 内嵌 HTML 必须剥掉（否则污染标题匹配与去重）----
+    font = [_item("9", '影驰<font class="skcolor_ljg">爆款</font>RTX5070 12G', "7299.00")
+            for _ in range(10)]
+    rows = parse_search_payload({"data": font})
+    check("京东：接口标题里的 <font> 标签被剥掉",
+          rows and "<font" not in rows[0]["title"] and "爆款" in rows[0]["title"],
+          rows[0]["title"] if rows else "（空）")
+
+    # ---- 价格口径：只认 jdPrice/realPrice，**不得**退到到手价或原价 ----
+    check("京东：优先取 jdPrice（实测与卡片展示价逐条吻合）",
+          _price_of({"jdPrice": "7299.00", "oriPrice": "9999.00"}) == 7299.0)
+    check("京东：jdPrice 缺失时退 realPrice（同义字段）",
+          _price_of({"realPrice": "7399.00"}) == 7399.0)
+    check("京东：**不得**拿 finalPrice 到手价顶替展示价（会口径污染）",
+          _price_of({"finalPrice": {"estimatedPrice": "6899"}}) is None,
+          str(_price_of({"finalPrice": {"estimatedPrice": "6899"}})))
+    check("京东：**不得**拿 oriPrice 原价顶替展示价",
+          _price_of({"oriPrice": "9999.00"}) is None)
+
+    # ---- 商品级去重键：wareId → item.jd.com 链接 → link_key 可用 ----
+    r0 = parse_search_payload({"data": good})[0]
+    check("京东：用 wareId 拼出商品页链接", r0["item_url"] == "https://item.jd.com/1000.html",
+          r0["item_url"])
+    check("京东：商品页链接能给出去重键（此前是搜索页 URL → 空串 → 只能回落）",
+          _N.link_key(r0["item_url"]) == "https://item.jd.com/1000.html",
+          repr(_N.link_key(r0["item_url"])))
+    check("京东：搜索页 URL 仍然不给键（回落行为不变）",
+          _N.link_key("https://search.jd.com/Search?keyword=x") == "")
+
+    # ---- 策略：正文匹配必须大小写不敏感（本轮修的真实缺陷）----
+    # URL 分支早就 lower 了，正文分支一直是裸 in → 大写特征静默失效。
+    upper = _pol.detect_rate_limit(
+        _FakePage("https://search.jd.com/Search", "", "RGV587_ERROR 请稍后再试"), "jd")
+    check("限流特征正文匹配大小写不敏感（大写特征不再静默失效）",
+          upper is not None, "大写 RGV587_ERROR 未被识别")
+    mixed = _pol.detect_rate_limit(
+        _FakePage("https://search.jd.com/Search", "", "Error_Code=40001"), "pdd")
+    check("限流特征正文匹配大小写不敏感（混合大小写）", mixed is not None)
+
+    # ---- 接线：京东确实挂了监听、且用完即摘 ----
+    import pathlib as _pl
+    jd_src = _pl.Path("app/collectors/jd_source.py").read_text(encoding="utf-8")
+    check("京东：navigate 之前挂响应监听", 'page.on("response", _on_response)' in jd_src)
+    check("京东：监听用完即摘（否则多型号会重复解析 300KB）",
+          'page.remove_listener("response", _on_response)' in jd_src)
+    check("京东：按接口标识过滤（不能什么响应都当商品）",
+          "SEARCH_API_MARK not in resp.url" in jd_src)
+    check("京东：按体积下限区分商品载荷与 AB 配置",
+          "len(body) < _MIN_PAYLOAD_BYTES" in jd_src)
+    check("京东：DOM 兜底保留（接口失效不能整源归零）",
+          "def _quotes_from_dom" in jd_src and 'note_stage("回落DOM")' in jd_src)
+    check("京东：接口命中打点存在（分段计数要看得到）",
+          'note_stage("接口命中")' in jd_src)
+
+    # ---- 接线：三处特征/字段确实在 ----
+    check("京东 URL 特征含 risk_handler（本轮补的）",
+          "risk_handler" in _pol.policy_for("jd").rate_limit_url_patterns)
+    xy_src = _pl.Path("app/collectors/xianyu_source.py").read_text(encoding="utf-8")
+    check("闲鱼：Quote.extra 保留 item_id（此前解析出来又被丢掉）",
+          '"item_id": row.get("item_id")' in xy_src)
+
+    # ---- 可执行层：符号真的可解析（文本断言抓不到缺 import）----
+    import app.collectors.jd_source as _jd
+    check("京东模块的解析符号真的可用",
+          callable(getattr(_jd, "parse_search_payload", None))
+          and callable(getattr(_jd, "note_stage", None)))
+
+
 def test_registry_is_clean() -> None:
     """元守卫：测试注册表与定义必须一一对应。
 
@@ -3286,6 +3388,7 @@ def test_registry_is_clean() -> None:
 
 def main() -> int:
     tests = (
+        test_jd_payload_and_policy_case,
         test_backoff_decay_and_floor,
         test_stage_counts,
         test_dedupe_identity,

@@ -191,6 +191,9 @@ JD = ThrottlePolicy(
     rate_limit_url_patterns=(
         "busy.html",
         "verify",
+        # 京东风控处置页。子 Agent 读同类项目时发现我们漏了它 ——
+        # 它和 busy.html 同类，但 URL 里没有 busy 字样，旧特征抓不到。
+        "risk_handler",
         "risk.jd.com",
         "anti.jd.com",
         "passport.jd.com",     # 被踢到登录页 = 登录态已被风控处置
@@ -384,9 +387,15 @@ def detect_rate_limit(page, code: str | None, status: int | None = None):
 
     title, text = _text_probe(page)
     probe = f"{title}\n{text}"
+    # ⚠️ 正文分支必须**两边都 lower** —— URL 分支早就 lower 了，正文分支却一直是裸 `in`，
+    #    于是任何含大写 ASCII 的特征（如 `RGV587_ERROR`、`FAIL_SYS_USER_VALIDATE`、
+    #    `Error_Code`）都会**静默永不命中**：不报错、不熔断，只是安静地失效。
+    #    实测 2026-10-02 核验：URL 走 `(page.url or "").lower()`，正文没有。
+    probe_lower = probe.lower()
     for indicator in pol.rate_limit_indicators:
-        if indicator in probe:
-            idx = probe.find(indicator)
+        if indicator.lower() in probe_lower:
+            idx = probe_lower.find(indicator.lower())
+            # 片段取自**原文**，保持日志可读（不能被 lower 改写）
             snippet = probe[max(0, idx - 40): idx + 80].replace("\n", " ").strip()
             return (indicator, snippet)
 
