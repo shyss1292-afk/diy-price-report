@@ -226,6 +226,20 @@ def build_launch_args(
         # ---- A) 隔离与降噪 ----
         "--no-first-run",
         "--no-default-browser-check",
+        # 崩溃恢复气泡（"Chrome 未正确关闭 / 是否恢复标签页"）。
+        #
+        # 为什么必须加：本项目的浏览器**经常被强杀** ——
+        #   · 墙钟兜底 `os._exit(3)`（pipeline）
+        #   · 停滞看门狗 `os._exit(4)`（pipeline，2026-10-01 加）
+        #   · shell 看门狗 `kill -KILL`（collect_scheduled.sh）
+        # 强杀后 profile 里的 `exit_type` 会写成 `Crashed`，下次启动
+        # Chrome 就弹那个气泡 —— 采集在后台跑，没人去点它，它会一直挂着。
+        #
+        # ⚠️ 这个开关**只影响 UI 气泡**，不改渲染能力，与下方「抗指纹底线」
+        #    不冲突（同 --disable-breakpad 一类：都是关掉打扰，不是削弱指纹）。
+        #    另外 `_normalize_profile_exit_type()` 会在启动前把 exit_type
+        #    复位，两道保险 —— 有些 Chrome 版本/分支不认这个开关。
+        "--hide-crash-restore-bubble",
         "--disable-sync",                   # 云同步会把 profile 关联到用户账号
         "--disable-background-networking",   # 后台遥测 / 更新检查
         "--disable-component-update",        # 组件热更新（会写 profile）
@@ -507,6 +521,43 @@ def _reap_port_holders(port: int) -> list[int]:
     return reaped
 
 
+def _normalize_profile_exit_type(profile_dir: Path | str) -> str:
+    """把 profile 里的「上次异常退出」标记复位，返回复位前的值。
+
+    为什么需要（用户反馈：关闭 Chrome 后总弹「未正确关闭」）
+    ------------------------------------------------------
+    本项目的浏览器**经常被强杀**（墙钟兜底 / 停滞看门狗 / shell 看门狗都用
+    SIGKILL 或 os._exit），强杀后 Chrome 在 `Preferences` 里写下
+    `profile.exit_type = "Crashed"`。下次启动就会弹「Chrome 未正确关闭 /
+    是否恢复标签页」—— 采集在后台跑没人去点，气泡就那么挂着。
+
+    `--hide-crash-restore-bubble` 能挡住气泡，但**不是所有 Chrome 分支都认**，
+    所以这里再做一道：直接改文件。
+
+    ⚠️ 必须在**浏览器没在运行时**调用（运行中的 Chrome 会用内存里的值覆盖回来）。
+       调用点放在 `launch_browser()` 里、启动之前，正好满足。
+    ⚠️ 只动 `profile` 下的两个键，其余原样写回 —— 别把整个 Preferences
+       重排或丢字段，那会连带清掉登录态相关的东西。
+    """
+    pref = Path(profile_dir) / "Default" / "Preferences"
+    if not pref.exists():
+        return ""
+    try:
+        data = json.loads(pref.read_text(encoding="utf-8", errors="replace"))
+        prof = data.setdefault("profile", {})
+        before = str(prof.get("exit_type") or "")
+        if before in ("Normal", ""):
+            return before          # 已经是干净的，不用写盘
+        prof["exit_type"] = "Normal"
+        prof["exited_cleanly"] = True
+        pref.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        logger.info("复位 profile 的异常退出标记：exit_type %r → 'Normal'", before)
+        return before
+    except Exception as e:  # noqa: BLE001 —— 复位失败不该挡住启动
+        logger.warning("复位 profile 退出标记失败（忽略）：%s", e)
+        return ""
+
+
 def launch_browser(wait_seconds: float = 20.0, force: bool = False, park: bool = True) -> bool:
     """确保有一个**可用的**调试浏览器（已启动且健康则直接返回 True）。
 
@@ -532,6 +583,9 @@ def launch_browser(wait_seconds: float = 20.0, force: bool = False, park: bool =
         raise RuntimeError("未找到可用的 Chromium 内核浏览器（Chrome / Edge / Chromium / Brave）")
 
     BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
+    # 复位「上次被强杀」标记 —— 否则 Chrome 会弹「未正确关闭」气泡，
+    # 而后台采集没人去点它。必须在启动**之前**做（见函数文档）。
+    _normalize_profile_exit_type(BROWSER_PROFILE)
 
     # ---- 启动前防御：清残留锁 + 核端口（2026-09-23 补）----
     #

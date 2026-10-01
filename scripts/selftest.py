@@ -2188,6 +2188,76 @@ def test_stall_guard_config() -> None:
           "没找到心跳调用")
 
 
+def test_profile_crash_flag_reset() -> None:
+    """强杀后要复位 profile 的「异常退出」标记。
+
+    为什么必须守（用户反馈："关掉谷歌浏览器总是弹未正确关闭"）
+    ----------------------------------------------------------
+    本项目的浏览器**经常被强杀**：
+
+      · 墙钟兜底 `os._exit(3)`（pipeline）
+      · 停滞看门狗 `os._exit(4)`（2026-10-01 加）
+      · shell 看门狗 `kill -KILL`（collect_scheduled.sh）
+
+    强杀后 Chrome 在 `Preferences` 里写下 `profile.exit_type = "Crashed"`，
+    下次启动就弹「Chrome 未正确关闭 / 是否恢复标签页」——
+    采集在后台跑，没人去点那个气泡，它就一直挂着。
+
+    两道保险都要守：
+      1. 启动参数里的 `--hide-crash-restore-bubble`（挡气泡，但不保证所有分支都认）
+      2. 启动前复位 `exit_type`（直接改文件，必定生效）
+    """
+    import json
+    import tempfile
+    from pathlib import Path as _P
+
+    from app.services.session import _normalize_profile_exit_type as norm
+
+    with tempfile.TemporaryDirectory() as td:
+        d = _P(td) / "Default"
+        d.mkdir(parents=True)
+        pref = d / "Preferences"
+
+        # ---- ① Crashed 必须被复位，且不能丢掉别的键 ----
+        pref.write_text(json.dumps({
+            "profile": {"exit_type": "Crashed", "other": 1},
+            "keep": "x",
+        }), encoding="utf-8")
+        before = norm(td)
+        after = json.loads(pref.read_text(encoding="utf-8"))
+        check("Crashed 被复位", after["profile"]["exit_type"] == "Normal",
+              f"{after['profile']['exit_type']}")
+        check("返回复位前的值（便于日志）", before == "Crashed", f"{before!r}")
+        check("**不丢其他键**（Preferences 里还有登录态相关字段）",
+              after["profile"].get("other") == 1 and after.get("keep") == "x")
+        check("同时置 exited_cleanly", after["profile"].get("exited_cleanly") is True)
+
+        # ---- ② 已经是 Normal 时不该写盘（省 I/O，也别无谓改动文件）----
+        pref.write_text(json.dumps({"profile": {"exit_type": "Normal"}}), encoding="utf-8")
+        m1 = pref.stat().st_mtime_ns
+        norm(td)
+        check("已是 Normal 时不写盘", pref.stat().st_mtime_ns == m1)
+
+        # ---- ③ 容错：文件不存在 / JSON 损坏都不能崩 ----
+        check("profile 不存在时返回空串不崩", norm(_P(td) / "nope") == "")
+        pref.write_text("{ 坏 json", encoding="utf-8")
+        check("Preferences 损坏时不崩", norm(td) == "")
+
+    # ---- ④ 启动参数里必须有防气泡开关 ----
+    from app.services import session as sess
+
+    args = sess.build_launch_args("/usr/bin/true", "/tmp/p", 9222, park_window=False)
+    joined = " ".join(args)
+    check("启动参数含 --hide-crash-restore-bubble（挡「未正确关闭」气泡）",
+          "--hide-crash-restore-bubble" in joined,
+          "缺这个开关，强杀后下次启动会弹气泡")
+    # 防气泡开关不能顺手把抗指纹的底线弄丢 —— 这是加参数时最容易踩的坑
+    check("加防气泡开关后仍保留 --user-data-dir（物理隔离底线）",
+          any(a.startswith("--user-data-dir=") for a in args))
+    check("加防气泡开关后仍禁用同步（不关联用户账号）",
+          "--disable-sync" in joined)
+
+
 def test_schedule_avoids_commute() -> None:
     """采集触发时间必须避开通勤合盖窗口（2026-09-24 改）。
 
@@ -2524,6 +2594,7 @@ def main() -> int:
         test_coverage_scope_matches_collection,
         test_alert_config_update,
         test_stall_guard_config,
+        test_profile_crash_flag_reset,
         test_policy_delays,
         test_rate_limit_detection,
         test_breaker,
