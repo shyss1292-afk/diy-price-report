@@ -57,9 +57,14 @@ from pathlib import Path
 # 凭据文件（data/ 被 .gitignore 整目录覆盖，不会进版本库）
 CRED_FILE = Path(__file__).resolve().parent.parent / "data" / "jd_union.json"
 
-# 网关：主 + 备。实测两者返回一致（都是真网关）。
+# 网关。
+#
+# ⚠️ 联盟开放平台首页有一条重要通知（2026-10-01 截图确认）：
+#     「联盟开放平台系统已升级到新版服务。旧版服务（域名：**router.jd.com** 及
+#       sdk：jd-cps-client-x.x.jar）**已停止维护**，请仍在使用旧版服务的用户尽早迁移。」
+#     所以备用网关 router.jd.com 已经**不能再依赖**了 —— 它当时还能转发，
+#     但官方已宣布停维护，随时可能失效。
 GATEWAY = "https://api.jd.com/routerjson"
-GATEWAY_BACKUP = "https://router.jd.com/api"
 
 # 官方 jdunion 页面列出的两个商品类接口
 METHODS = {
