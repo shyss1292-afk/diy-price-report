@@ -532,8 +532,11 @@ def _run_breaker_cases(breaker, tmp: Path) -> None:
 
     # 生产路径：trip 不传 seconds → 走阶梯（传死值会让阶梯形同虚设）
     breaker.trip("jd", reason="访问频繁")
-    check("trip 默认走阶梯第 1 级（30 分钟）",
-          1780 < breaker.cooldown_remaining("jd") <= 1800,
+    # 第 1 级原值 30 分钟，但**短于轮次间隔（1 小时）** —— 调度上等于不存在
+    # （fast_fail 在下一轮开始时才评估冷却，那时早已过期），所以被抬到
+    # 最短生效时长。阶梯原值 vs 生效时长的区别见 test_backoff_decay_and_floor。
+    check("trip 走阶梯第 1 级，并被抬到最短生效时长（> 1 小时）",
+          breaker.cooldown_remaining("jd") > 3600.0,
           f"实际 {breaker.cooldown_remaining('jd'):.0f}s")
     check("连续次数记为 1", breaker.consecutive_trips("jd") == 1)
 
@@ -566,7 +569,8 @@ def _run_breaker_cases(breaker, tmp: Path) -> None:
     breaker.trip("jd", 0.2, "短冷却")
     check("冷却未过期时 record_success 仍被拒绝", breaker.record_success("jd") is False)
     time.sleep(0.3)
-    check("冷却过期后 record_success 清零成功", breaker.record_success("jd") is True)
+    check("冷却过期后 record_success 被接受（余量 1 → 清掉）",
+          breaker.record_success("jd") is True)
     check("清零后连续次数归零", breaker.consecutive_trips("jd") == 0)
     check("清零后不再处于冷却", breaker.is_cooling("jd") is False)
     check("无记录时 record_success 返回 False（不白写盘）",
@@ -574,8 +578,8 @@ def _run_breaker_cases(breaker, tmp: Path) -> None:
 
     breaker.clear()
     breaker.trip("jd", reason="访问频繁")
-    check("清零后再次熔断回到阶梯第 1 级（30 分钟）",
-          breaker.cooldown_remaining("jd") <= 1800
+    check("余量减到 0 后再次熔断，从阶梯第 1 级重新开始",
+          3600 < breaker.cooldown_remaining("jd") <= breaker.min_cooldown() + 5
           and breaker.consecutive_trips("jd") == 1)
     breaker.clear()
 
@@ -723,10 +727,14 @@ def test_soft_cap() -> None:
 
 
 def test_soft_trip_end_to_end() -> None:
-    """软风控 trip：第 1 次 15 分钟，连续第 2 次必须升到 2 小时（走真实 trip()）。
+    """软风控 trip：走**独立**阶梯 —— 连续被拦时逐级放大，且第 3 级短于硬阶梯。
 
-    ⚠️ 第 2 次这条是本轮修复的核心 —— 旧逻辑下第 2 次仍是 15 分钟，
-       于是"退避到期即再拦"可以无限循环。
+    ⚠️ 两个关键点：
+      · 第 2 次必须升到 2 小时 —— 旧逻辑下第 2 次仍是 15 分钟，
+        于是"退避到期即再拦"可以无限循环。
+      · 软/硬的区分点**不在第 1 级**：第 1 级软(15分)/硬(30分)都短于轮次间隔，
+        在每小时一轮的调度上等于不存在，统一被 min_cooldown() 抬到 65 分钟 ——
+        所以第 1 级两者相同。真正的区分从第 3 级开始（软 4 小时 vs 硬 6 小时）。
     """
     from app.services import breaker
 
@@ -737,8 +745,8 @@ def test_soft_trip_end_to_end() -> None:
         breaker.clear()
         breaker.trip("pdd", reason="系统繁忙")
         entry = breaker.entry_of("pdd")
-        check("软风控第 1 次 trip 冷却 = 软阶梯第 1 级（15 分钟），不是硬阶梯的 30 分钟",
-              880 < breaker.cooldown_remaining("pdd") <= 900,
+        check("软风控第 1 次 trip 被抬到最短生效时长（原值 15 分钟在调度上空转）",
+              breaker.cooldown_remaining("pdd") > 3600,
               f"{entry['cooldown_text']}")
         check("记录里带 severity=soft", entry.get("severity") == "soft")
         check("snapshot 也带 severity", breaker.snapshot()["pdd"]["severity"] == "soft")
@@ -752,10 +760,20 @@ def test_soft_trip_end_to_end() -> None:
         check("第 2 次冷却长于轮次间隔 → 下一个定时轮次会被 Fast-Fail 跳过",
               breaker.cooldown_remaining("pdd") > 3600)
 
+        breaker.trip("pdd", reason="系统繁忙")
+        check("软风控第 3 次 → 4 小时（软阶梯末级）",
+              14000 < breaker.cooldown_remaining("pdd") <= 14400,
+              f"实际 {breaker.cooldown_remaining('pdd'):.0f}s")
+        check("软风控确实没套用硬阶梯（第 3 次若是硬阶梯会是 6 小时）",
+              breaker.cooldown_remaining("pdd") < 21600)
+
+        # 硬阶梯的区分点在第 3 级：6 小时 vs 软风控的 4 小时
         breaker.clear()
-        breaker.trip("jd", reason="访问频繁")
-        check("硬拦截 trip 后仍是完整阶梯第 1 级（30 分钟）",
-              1780 < breaker.cooldown_remaining("jd") <= 1800)
+        for _ in range(3):
+            breaker.trip("jd", reason="访问频繁")
+        check("硬拦截走硬阶梯（第 3 次 = 6 小时，与软风控的 4 小时不同）",
+              21500 < breaker.cooldown_remaining("jd") <= 21600,
+              f"实际 {breaker.cooldown_remaining('jd'):.0f}s")
         check("记录里带 severity=hard", breaker.entry_of("jd").get("severity") == "hard")
     finally:
         breaker.BREAKER_FILE = original
@@ -3101,6 +3119,132 @@ def test_stage_counts() -> None:
           and callable(getattr(_base_mod, "take_stage_counts", None)))
 
 
+def test_backoff_decay_and_floor() -> None:
+    """退避阶梯的两个「实际生效」前提（2026-10-02 加）。
+
+    它们解决同一类失效：**阶梯写在那里，但在真实调度上不起作用**。
+
+      ① 最短生效时长 —— 第 1 级（硬 30 分钟 / 软 15 分钟）都**短于轮次间隔（1 小时）**，
+         而 `fast_fail` 是在**下一轮开始时**才评估冷却的，到那时冷却早已过期。
+         于是「第 1 级退避」一轮都没跳过，每小时照样去撞。
+      ② 递减而非清零 —— 原来一次成功就把余量清零。平台「一小时被拦、下一小时
+         侥幸采到」时台阶每次都被重置回第 1 级，**永远升不到第 2 级**
+         （京东 2026-10-01 正是这个形态：下午被拦、晚上正常）。
+    """
+    from app.services import breaker
+
+    # ---- 阶梯本身没动值（生效时长只在 trip() 里抬，纯函数保持原值）----
+    check("backoff_for 仍是阶梯原值（抬升只发生在 trip 里）",
+          [breaker.backoff_for(n) for n in (1, 2, 3, 4)] == [1800.0, 7200.0, 21600.0, 86400.0],
+          f"实际 {[breaker.backoff_for(n) for n in (1, 2, 3, 4)]}")
+
+    check("默认最短生效时长 ≥ 1 小时（否则第 1 级在每小时一轮的调度上空转）",
+          breaker.min_cooldown() >= 3600.0, f"实际 {breaker.min_cooldown()}")
+
+    tmp = Path(tempfile.mkdtemp(prefix="diyprice_breaker_eff_"))
+    original = breaker.BREAKER_FILE
+    breaker.BREAKER_FILE = tmp / "breaker.json"
+    try:
+        # ---- ① 第 1 级被抬到 > 1 小时 ----
+        breaker.clear()
+        breaker.trip("jd", reason="访问频繁")
+        left = breaker.cooldown_remaining("jd")
+        check("硬拦截第 1 级被抬到 > 1 小时（阶梯原值只有 30 分钟）",
+              left > 3600.0, f"实际 {left:.0f}s")
+        # 真跑一次第 2 级，确认下限不会把更长的级**压短**
+        breaker.trip("jd", reason="访问频繁")
+        check("下限不会把更长的级压短（第 2 级仍是 2 小时）",
+              7180 < breaker.cooldown_remaining("jd") <= 7200,
+              f"实际 {breaker.cooldown_remaining('jd'):.0f}s")
+
+        # ---- 软风控第 1 级（15 分钟）原本同样是空转 ----
+        breaker.clear()
+        breaker.trip("pdd", reason="系统繁忙")
+        soft_left = breaker.cooldown_remaining("pdd")
+        check("软风控第 1 级被抬到 > 1 小时（原值 15 分钟）",
+              soft_left > 3600.0, f"实际 {soft_left:.0f}s")
+        check("软风控仍受总上限约束（上限优先于下限）",
+              soft_left <= breaker.soft_cap(), f"{soft_left:.0f} > {breaker.soft_cap():.0f}")
+
+        # ---- 显式传 seconds 的路径**不**套下限（单测/排障要能设秒级）----
+        breaker.clear()
+        breaker.trip("jd", 2.0, "短冷却")
+        exp_left = breaker.cooldown_remaining("jd")
+        check("显式传 seconds 时不套最短生效时长（排障要能设秒级）",
+              1.5 < exp_left <= 2.0, f"实际 {exp_left:.2f}s")
+
+        # ---- ② 递减而不是清零 ----
+        breaker.clear()
+        for _ in range(3):
+            breaker.trip("jd", 0.05, "短冷却")      # 显式传值 → 冷却立即过期
+        check("连续 3 次 → 余量 3", breaker.consecutive_trips("jd") == 3)
+        time.sleep(0.12)
+        check("冷却过期后 record_success 被接受", breaker.record_success("jd") is True)
+        check("成功一轮只**减一级**（不是清零）—— 一次侥幸不该抹掉整条阶梯",
+              breaker.consecutive_trips("jd") == 2,
+              f"实际 {breaker.consecutive_trips('jd')}")
+        check("递减后不再处于冷却（余量保留、冷却作废）",
+              breaker.is_cooling("jd") is False and breaker.snapshot() == {})
+
+        breaker.trip("jd", reason="访问频繁")
+        check("余量 2 → 再熔断走到第 3 级（21600s），不是从第 1 级重来",
+              breaker.consecutive_trips("jd") == 3
+              and breaker.cooldown_remaining("jd") > 21000.0,
+              f"trips={breaker.consecutive_trips('jd')} "
+              f"left={breaker.cooldown_remaining('jd'):.0f}s")
+        breaker.clear()
+
+        # ---- 减到 0 才整条清掉 ----
+        for _ in range(2):
+            breaker.trip("jd", 0.05, "短冷却")
+        time.sleep(0.12)
+        check("余量 2 → 1",
+              breaker.record_success("jd") is True
+              and breaker.consecutive_trips("jd") == 1)
+        check("余量 1 → 0（记录整条清掉，下次从第 1 级开始）",
+              breaker.record_success("jd") is True
+              and breaker.consecutive_trips("jd") == 0
+              and breaker.entry_of("jd") == {})
+
+        # ---- 探针 verified=True 仍然一次清掉 ----
+        breaker.clear()
+        for _ in range(4):
+            breaker.trip("jd", 3600, "访问频繁")
+        check("余量 4 且冷却中",
+              breaker.consecutive_trips("jd") == 4 and breaker.is_cooling("jd"))
+        check("探针 verified=True 一次清掉（那是证据，不是侥幸）",
+              breaker.record_success("jd", verified=True) is True
+              and breaker.consecutive_trips("jd") == 0)
+
+        # ---- 下限可覆盖 / 可关掉 ----
+        with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_MIN_COOLDOWN": "120"}):
+            check("DIYPRICE_BREAKER_MIN_COOLDOWN 覆盖生效",
+                  breaker.min_cooldown() == 120.0, f"实际 {breaker.min_cooldown()}")
+            breaker.clear()
+            breaker.trip("jd", reason="访问频繁")
+            over_left = breaker.cooldown_remaining("jd")
+            check("下限压到 120s 后第 1 级回到阶梯原值 1800s",
+                  1790 < over_left <= 1800, f"实际 {over_left:.0f}s")
+        with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_MIN_COOLDOWN": "0"}):
+            check("设为 0 可关掉下限",
+                  breaker.min_cooldown() == 0.0, f"实际 {breaker.min_cooldown()}")
+        with mock.patch.dict(os.environ, {"DIYPRICE_BREAKER_MIN_COOLDOWN": "abc"}):
+            check("非法值回落到默认（不炸）",
+                  breaker.min_cooldown() == 3900.0, f"实际 {breaker.min_cooldown()}")
+
+        # ---- 接线：采集侧日志必须报出余量变化（否则"减一级"看不出来）----
+        import pathlib as _pl
+        bsrc = _pl.Path("app/collectors/base.py").read_text(encoding="utf-8")
+        check("采集侧报出余量变化（before → after）",
+              '"%s 本轮正常采到 %d 条且未触发限流，退避阶梯余量 %d → %d%s"' in bsrc)
+        check("采集侧先读 before 再调 record_success（顺序反了会永远报 0）",
+              bsrc.index("before = breaker.consecutive_trips(code)")
+              < bsrc.index("if breaker.record_success(code) and before:"))
+    finally:
+        breaker.BREAKER_FILE = original
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_registry_is_clean() -> None:
     """元守卫：测试注册表与定义必须一一对应。
 
@@ -3142,6 +3286,7 @@ def test_registry_is_clean() -> None:
 
 def main() -> int:
     tests = (
+        test_backoff_decay_and_floor,
         test_stage_counts,
         test_dedupe_identity,
         test_xianyu_api_parse,

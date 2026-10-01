@@ -440,6 +440,10 @@ def cmd_breaker(args) -> int:
     ))
     print(f"     软风控总上限：{breaker.human_duration(breaker.soft_cap())}"
           f"（DIYPRICE_BREAKER_SOFT_CAP 可压小，排障用）")
+    print(f"     ⏱ 冷却不短于：{breaker.human_duration(breaker.min_cooldown())}"
+          f"（= 一轮 + 5 分钟缓冲。第 1 级原值短于轮次间隔，"
+          f"在每小时一轮的调度上等于不存在；"
+          f"DIYPRICE_BREAKER_MIN_COOLDOWN 可覆盖，设 0 关掉）")
 
     print()
     snap = breaker.snapshot()

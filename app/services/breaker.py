@@ -11,7 +11,8 @@
 
     trip()                命中限流时登记冷却截止时间（时长按退避阶梯）
     fast_fail()           Fast-Fail 门禁：冷却期内直接跳过，**绝不等待**
-    record_success()      该轮正常采到数据且无限流 → 连续熔断计数清零
+    record_success()      该轮正常采到数据且无限流 → 退避阶梯**减一级**
+                          （只有探针 verified=True 才整条清掉）
     cooldown_remaining()  还剩多久
     wait_until_ready()    需要等的时候才等（剩余 ≤ 上限就睡，超过就跳过）
     clear()               手动解除
@@ -36,8 +37,20 @@
     连续第 3 次  6 小时
     连续第 4 次  24 小时（封顶，不再增长）
 
-计数是**连续**的：只要某轮该平台正常采到数据且没有触发限流，
-`record_success()` 就把它清零，下次熔断从 30 分钟重新开始。
+计数**递减**而非清零（2026-10-02 改）：某轮正常采到数据且没有触发限流时，
+`record_success()` 把余量**减 1**。原先直接清零 —— 那意味着平台
+"一小时被拦、下一小时侥幸采到"时台阶每次都被重置回第 1 级，
+**永远升不上去**（京东 2026-10-01 正是这个形态：下午被拦、晚上正常）。
+只有探针（`verified=True`，限频的主动单型号请求）才允许整条清掉 ——
+那是"渠道此刻可用"的直接证据，不是侥幸。
+
+⚠️ 冷却**不短于「一轮 + 5 分钟」**（`min_cooldown()`，默认 65 分钟）。
+   理由：采集是每小时一轮，而 `fast_fail()` 在**下一轮开始时**才评估冷却 ——
+   所以任何短于轮次间隔的冷却，在调度上等于不存在。第 1 级
+   （硬 30 分钟 / 软 15 分钟）正是这种情况：它写在文档里像退避，
+   实际**一轮都没跳过**。本项目两次实测都指向这一点：
+     · 2026-09-24 「15 分钟 < 轮次间隔，所以不跳过任何一轮」
+     · 2026-10-01 京东下午被拦 → 30 分钟冷却在下一轮早已过期 → 每小时继续撞
 
 配合这个阶梯，门禁必须是 **Fast-Fail** —— 等 6 小时没有任何意义，
 所以 `fast_fail()` 不睡，直接让调度层跳过该平台（不分配任务、不拉起浏览器），
@@ -75,6 +88,18 @@ _SLEEP_CHUNK = 30.0
 # 跨轮次退避阶梯：连续熔断第 N 次对应的冷却秒数，末级封顶。
 # 30min / 2h / 6h / 24h —— 可用 DIYPRICE_BREAKER_LADDER 覆盖（逗号分隔秒数）。
 _DEFAULT_BACKOFF_LADDER: tuple[float, ...] = (1800.0, 7200.0, 21600.0, 86400.0)
+
+# 冷却的**最短生效时长**（秒）。默认 65 分钟 = 轮次间隔 1 小时 + 5 分钟缓冲。
+#
+# 为什么需要它：冷却是在**下一轮开始时**被 `fast_fail()` 评估的，所以任何
+# 短于轮次间隔的冷却在调度上等于不存在 —— 到点一看早就过期了，照样全速去撞。
+# 阶梯第 1 级（硬 30 分钟 / 软 15 分钟）正是这种情况：写在文档里像"退避"，
+# 实际连一轮都没跳过。
+#
+# 注意它只作用于**阶梯路径**：`trip(seconds=...)` 显式传值的场合
+# （单测 / 人工排障）按传入值走，不然秒级演练会被抬到 65 分钟。
+# 想回到"阶梯原值"设 DIYPRICE_BREAKER_MIN_COOLDOWN=0。
+_DEFAULT_MIN_COOLDOWN = 3900.0
 
 # ------------------------------------------------------------------ 错误分级
 #
@@ -229,6 +254,28 @@ def soft_cap() -> float:
     return soft_ladder()[-1]
 
 
+def min_cooldown() -> float:
+    """冷却的**最短生效时长**（秒）—— 默认 65 分钟，`DIYPRICE_BREAKER_MIN_COOLDOWN` 可覆盖。
+
+    为什么要有下限：冷却是在**下一轮开始时**被 `fast_fail()` 评估的，
+    所以短于轮次间隔（1 小时）的冷却在调度上根本不起作用 ——
+    等下一轮跑起来，它早就过期了。阶梯第 1 级（硬 30 分钟 / 软 15 分钟）
+    正是这种"文档里是退避、实际一轮没跳过"的情形。
+
+    设 0 可关掉（回到阶梯原值），排障/演练时用。
+    """
+    raw = os.getenv("DIYPRICE_BREAKER_MIN_COOLDOWN", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logger.warning(
+                "DIYPRICE_BREAKER_MIN_COOLDOWN=%r 不是数字，改用默认 %.0fs", raw,
+                _DEFAULT_MIN_COOLDOWN,
+            )
+    return _DEFAULT_MIN_COOLDOWN
+
+
 def classify(reason: str) -> str:
     """把限流原因分成 `"hard"`（硬拦截）或 `"soft"`（软风控）。
 
@@ -303,7 +350,8 @@ def trip(
     """登记一次熔断，返回冷却截止时间戳（epoch 秒）。
 
     冷却时长默认由**跨轮次退避阶梯**决定（见模块头）：连续第 N 次熔断取阶梯
-    第 N 级。硬 / 软走两条独立阶梯 —— 若 `severity` 判定为软风控（或未传时由
+    第 N 级，且**不短于** `min_cooldown()`（第 1 级短于轮次间隔会空转，见常量注释）。
+    硬 / 软走两条独立阶梯 —— 若 `severity` 判定为软风控（或未传时由
     `classify(reason)` 判出），走 `soft_ladder()`（15min/2h/4h），
     并再受 `soft_cap()` 总上限约束。
 
@@ -311,14 +359,25 @@ def trip(
     生产路径不传（见 `base.run_browser_batch`），否则阶梯会被架空。
 
     同源再次 trip 时**取较晚的截止时间** —— 冷却不该因为重复触发而变短。
-    连续计数 `trips` 在这里自增，由 `record_success()` 清零。
+    连续计数 `trips` 在这里自增，由 `record_success()` **递减**（一次成功减一级，
+    减到 0 才整条清掉）。
     """
     with _LOCK:
         data = _load()
         prev = data["sources"].get(source) or {}
         consecutive = int(prev.get("trips", 0)) + 1
         sev = severity or classify(reason)
-        cooldown = float(seconds) if seconds is not None else backoff_for(consecutive, sev)
+        if seconds is not None:
+            # 显式传值（单测 / 人工排障）：按传入值，不套阶梯也不套下限
+            cooldown = float(seconds)
+        else:
+            # 生产路径：阶梯级 → 但不短于「一轮 + 缓冲」的下限
+            # （短于它的冷却在每小时一轮的调度上等于不存在，见 _DEFAULT_MIN_COOLDOWN）
+            cooldown = max(backoff_for(consecutive, sev), min_cooldown())
+            if sev == "soft":
+                # 上限优先于下限 —— 排障时把 soft_cap 压到秒级，
+                # 就不该被下限又抬回 65 分钟
+                cooldown = min(cooldown, soft_cap())
         cooldown = max(0.0, cooldown)
 
         until = time.time() + cooldown
@@ -339,14 +398,23 @@ def trip(
 
 
 def record_success(source: str, verified: bool = False) -> bool:
-    """某轮该平台**正常采到数据且没有触发限流** → 连续熔断计数清零。
+    """某轮该平台**正常采到数据且没有触发限流** → 退避阶梯**减一级**。
 
-    返回是否真的清掉了记录。三条护栏：
+    为什么是递减而不是清零（2026-10-02 改）
+    -------------------------------------
+    清零对"连续被拦"有效，但**对"间歇性被拦"完全无效**：平台一小时被拦、
+    下一小时侥幸采到几条 → 台阶每次被重置回第 1 级 → 永远升不到第 2 级。
+    结果就是每小时都全速去撞同一堵墙，而文档里那个阶梯一次都没生效。
+
+    递减之后：连着被拦会正常累积到长冷却；偶尔成功只让余量退一格，
+    不至于让一次侥幸抹掉整条阶梯。减到 0 才整条清掉。
+
+    返回是否真的处理了记录。护栏：
 
       · 记录不存在（本来就没熔断过）→ 返回 False，不写盘
       · 仍在冷却期内 → 返回 False。这种情况本来就不该出现"成功"，
         真出现了更可能是侥幸拿到一两条，不足以说明风控已解除 ——
-        宁可让计数留着，也不要因为一次侥幸把退避阶梯重置回 30 分钟。
+        宁可让余量留着，也不要因为一次侥幸放宽退避。
       · `verified=True` 时**豁免上一条**（探针专用）。
 
     关于 `verified`
@@ -365,13 +433,34 @@ def record_success(source: str, verified: bool = False) -> bool:
             return False
         if not verified and float(entry.get("until", 0)) > time.time():
             return False
-        data["sources"].pop(source, None)
+        # 探针：一次成功就是"渠道此刻可用"的直接证据 → 整条清掉。
+        # 调度路径：余量已只剩 1 级 → 减完即为 0，同样整条清掉。
+        if verified or int(entry.get("trips", 1)) <= 1:
+            data["sources"].pop(source, None)
+            _save(data)
+            return True
+
+        # ⚠️ 调度路径：**递减**而不是清零。
+        #    清零的问题是「间歇性拦截」：平台一小时被拦、下一小时侥幸采到，
+        #    于是台阶每次都被重置回第 1 级，**永远升不到第 2 级** ——
+        #    退避阶梯写了等于没写（京东 2026-10-01 就是这个形态）。
+        remaining = int(entry.get("trips", 1)) - 1
+        entry["trips"] = remaining
+        entry["until"] = 0.0        # 冷却作废 → snapshot() 不再报"冷却中"
+        entry["until_text"] = ""
+        entry["decayed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data["sources"][source] = entry
         _save(data)
     return True
 
 
 def consecutive_trips(source: str) -> int:
-    """该平台当前连续熔断次数（0 = 没有未清零的记录）。"""
+    """该平台当前退避阶梯**余量**（0 = 没有记录）。
+
+    注意语义：递减机制下它不再严格等于"连续熔断次数"，而是"阶梯升到了第几级"。
+    余量 > 0 但 `is_cooling()` 为假，是**正常状态** —— 表示"这个平台被拦过
+    若干次、最近成功过但没退完"，下次熔断直接从该级起跳。
+    """
     with _LOCK:
         entry = _load()["sources"].get(source) or {}
     return int(entry.get("trips", 0))

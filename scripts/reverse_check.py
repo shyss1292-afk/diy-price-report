@@ -66,8 +66,8 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
     (
         "退避阶梯失效（trip 改回固定 180s）",
         BREAKER,
-        "        cooldown = float(seconds) if seconds is not None else backoff_for(consecutive, sev)",
-        "        cooldown = float(seconds) if seconds is not None else 180.0",
+        "            cooldown = max(backoff_for(consecutive, sev), min_cooldown())",
+        "            cooldown = 180.0",
     ),
     (
         "Fast-Fail 变成会睡觉（不再是 fast-fail）",
@@ -76,10 +76,16 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "    time.sleep(2.0)\n    return False, remaining\n\n\ndef wait_until_ready(",
     ),
     (
-        "record_success 不再清零连续计数",
+        "record_success 退回一次清零（一次侥幸抹掉整条退避阶梯）",
         BREAKER,
-        '        data["sources"].pop(source, None)\n        _save(data)\n    return True',
-        "        pass\n    return True",
+        '        remaining = int(entry.get("trips", 1)) - 1\n',
+        "        remaining = 0\n",
+    ),
+    (
+        "最短生效时长退回 0（第 1 级重新变成空转，每小时都去撞）",
+        BREAKER,
+        "_DEFAULT_MIN_COOLDOWN = 3900.0",
+        "_DEFAULT_MIN_COOLDOWN = 0.0",
     ),
     (
         "0 条文案退回「疑似被限流」（把数据质量问题说成风控）",

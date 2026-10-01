@@ -312,7 +312,7 @@ def network_dead(exc: Exception) -> bool:
 
 
 def should_reset_backoff(quote_count: int, aborted: bool, suspect_throttle: bool) -> bool:
-    """本轮够不够格把连续熔断计数清零（见 `breaker.record_success`）。
+    """本轮够不够格让退避阶梯**减一级**（见 `breaker.record_success`）。
     三个条件缺一不可，放宽任何一条都会让退避阶梯白设：
 
       · quote_count > 0     —— 真的采到数据了
@@ -439,8 +439,9 @@ def run_browser_batch(
     2. **批次前冷却门禁（Fast-Fail）**：上一轮触发过熔断的话，这里直接
        返回空、**不睡**（见 `breaker.fast_fail`）—— 退避动辄几小时，等它
        没有意义，时间要留给正常平台。调度层会先跳过，这里是第二道防线。
-    3. **成功重置**：本轮正常采到数据且没触发限流 → 连续熔断计数清零，
-       下次熔断从阶梯第 1 级重新开始（见 `breaker.record_success`）。
+    3. **成功递减**：本轮正常采到数据且没触发限流 → 退避阶梯余量**减一级**
+       （不是清零 —— 一次侥幸的成功不该抹掉整条阶梯；减到 0 才整条清掉，
+       见 `breaker.record_success`）。
     4. **平台差异化节奏**：间隔改由 `policy.next_delay()` 提供
        （高斯扰动 + 上下限夹取），不再是采集器里写死的区间。
     5. **单会话任务上限**：采满 N 个型号主动释放进程换新会话 ——
@@ -677,14 +678,18 @@ def run_browser_batch(
     if not merged and not aborted:
         logger.warning("%s 本轮 0 条报价；任务已留在队列，下一轮优先重做", label)
 
-    # ---- 成功重置：连续熔断计数清零 ----
+    # ---- 成功递减：退避阶梯余量减一级 ----
     # 判定规则见 `should_reset_backoff` —— 抽成纯函数是为了可断言，
     # 免得哪天被图省事改成 `if merged:`，退避阶梯就白设了。
     if should_reset_backoff(len(merged), aborted, suspect_throttle):
-        if breaker.record_success(code):
+        before = breaker.consecutive_trips(code)
+        if breaker.record_success(code) and before:
+            after = breaker.consecutive_trips(code)
             logger.info(
-                "%s 本轮正常采到 %d 条且未触发限流，连续熔断计数已清零（退避阶梯重置）",
-                label, len(merged),
+                "%s 本轮正常采到 %d 条且未触发限流，退避阶梯余量 %d → %d%s",
+                label, len(merged), before, after,
+                "（已归零，下次熔断从第 1 级重新开始）"
+                if after == 0 else "（一次成功只减一级，余量留到下次熔断起跳）",
             )
 
     stages = take_stage_counts()
