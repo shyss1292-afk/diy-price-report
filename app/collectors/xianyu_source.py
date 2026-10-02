@@ -27,6 +27,7 @@ from datetime import date
 
 from . import normalize
 from . import policy
+from .policy import AuthExpiredError, RateLimitError
 from .base import BaseCollector, Quote, note_stage, page_dead, run_browser_batch
 from .registry import register
 
@@ -161,6 +162,22 @@ def parse_search_payload(payload) -> list[dict]:
     out: list[dict] = []
     if not isinstance(payload, dict):
         return out
+
+    # ① 先看 ret 字段 —— 闲鱼 mtop 响应的「外层状态」（2026-10-02 新增）。
+    #    登录失效以 ret: ["FAIL_SYS_SESSION_EXPIRED::令牌过期"] 形式返回，
+    #    此前只看 resultList，登录失效时静默返回空 → 被上层当成"限流"
+    #    推进退避阶梯。依据 fancyboi999/goofish-cli core/mtop.py:141-177：
+    #    TOKEN_EXOIRED/TOKEN_EMPTY/SESSION_EXPIRED 是「刷 cookie 可救」；
+    #    FAIL_SYS_ILLEGAL_ACCESS 是风控层，刷 cookie 救不了 → RateLimitError。
+    _ret = payload.get("ret") or []
+    if isinstance(_ret, list) and _ret:
+        from .policy import AUTH_EXPIRED_CODES, RISK_CODES  # 局部导入：避免模块级循环
+        _code = str(_ret[0]).split("::", 1)[0].strip()
+        if _code in AUTH_EXPIRED_CODES:
+            raise AuthExpiredError("xianyu", _code, "接口 ret 字段返回登录失效码")
+        if _code in RISK_CODES:
+            raise RateLimitError("xianyu", _code, "接口 ret 字段返回风控码")
+
     data = payload.get("data")
     if not isinstance(data, dict):
         return out

@@ -3750,6 +3750,165 @@ def test_login_probe_shape() -> None:
           "bought" in LP.PROBES["goofish"]["url"])
 
 
+def test_blocked_snapshot_fix() -> None:
+    """三处 2026-10-02 下午的修复：blocked 双兜底 / JD result_count / 闲鱼 ret。
+
+    ① blocked：page.content() 在限流页常抛异常（页面已关闭），旧实现
+       except: pass 让 HTML 留空但照样写 0 字节 .html —— 实测 80 个留存里
+       35 个空文件。改后 content 失败走 evaluate 兜底，两者都失败只写 .json。
+    ② JD result_count：`rows==0` 有三种成因（真无货/改版/限流），
+       result_count 与 usable 的对比把前两种分开。
+    ③ 闲鱼 ret：登录失效以 ret:["FAIL_SYS_SESSION_EXPIRED::令牌过期"] 返回，
+       此前只看 resultList，静默返回空被当成"限流"推退避阶梯。
+    """
+    import json as _json
+    import pathlib
+
+    # ---------- ① blocked 双兜底（行为验证：伪造 page 对象） ----------
+    from app.collectors import policy as P
+
+    class _ContentFails:
+        """content() 抛异常（页面已关闭的常见形态），evaluate 兜底成功。"""
+
+        def __init__(self, html):
+            self._html = html
+
+        def content(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+        def evaluate(self, *_a, **_k):
+            return self._html
+
+        @property
+        def url(self):
+            return "https://x.example/blocked"
+
+    class _AllFail(_ContentFails):
+        def evaluate(self, *_a, **_k):
+            raise RuntimeError("also closed")
+
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="blk_"))
+    orig_dir = P._BLOCKED_DIR_NAME
+    orig_file = P.__dict__.get("_BLOCKED_DIR_NAME_OVERRIDE")
+    # _snapshot_blocked 用 config.DATA_DIR 定位目录 —— patch 掉
+    import app.config as _cfg
+    orig_data = _cfg.DATA_DIR
+    try:
+        _cfg.DATA_DIR = str(tmpdir)
+        P._last_snapshot.clear()
+
+        html = "<html><body>访问频繁</body></html>"
+        path1 = P._snapshot_blocked(_ContentFails(html), "jd", "访问频繁")
+        saved1 = pathlib.Path(path1)
+        check("① blocked：content 失败时 evaluate 兜底成功（HTML 非空）",
+              saved1.exists() and saved1.stat().st_size > 0
+              and "访问频繁" in saved1.read_text(encoding="utf-8"),
+              f"{path1} size={saved1.stat().st_size if saved1.exists() else 0}")
+
+        P._last_snapshot.clear()
+        path2 = P._snapshot_blocked(_AllFail(html), "jd", "访问频繁")
+        h2 = pathlib.Path(path2)
+        check("① blocked：两个通道都失败 → 不写空 .html（只留 .json 标注无现场）",
+              not h2.exists(),
+              f"{path2} 竟然存在")
+    finally:
+        _cfg.DATA_DIR = orig_data
+        if orig_file is not None:
+            P._BLOCKED_DIR_NAME = orig_file
+        else:
+            P._BLOCKED_DIR_NAME = orig_dir
+        P._last_snapshot.clear()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ---------- ② JD result_count / usable ----------
+    from app.collectors.jd_source import parse_search_payload as _jd
+
+    def _jitem(i):
+        return {"wareId": str(i), "wareName": f"技嘉RTX5070显卡{i} OC",
+                "jdPrice": f"{6000 + i}.00", "realPrice": f"{6000 + i}.00",
+                "oriPrice": "7000"}
+
+    st = {}
+    rows = _jd({"data": _json.dumps([_jitem(i) for i in range(10)])}, st)
+    check("② JD stats 记录 result_count 与 usable（正常时相等）",
+          st.get("result_count") == 10 and st.get("usable") == 10, str(st))
+
+    st2 = {}
+    _jd({"data": "[]"}, st2)
+    check("② JD 空数组：result_count=0 → 真无货信号",
+          st2.get("result_count") == 0 and st2.get("found") is False, str(st2))
+
+    # ⚠️ 全缺价格的数组**到不了** parse 层：形状判据要求「wareId 且价格可解析」
+    #    都成立才算可用元素 —— 全 None 时形状匹配直接失败 → found=False，
+    #    改版信号走「接口有载荷但无商品数组」分支（上一条已覆盖）。
+    st3 = {}
+    _jd({"data": _json.dumps([{"wareId": str(i),
+                              "wareName": f"影驰RTX5070显卡{i} 12G",
+                              "jdPrice": None}
+                              for i in range(10)])}, st3)
+    check("② JD 全缺价格 → 形状判据失败 → found=False（改版信号走「无商品数组」分支）",
+          st3.get("found") is False and st3.get("result_count") == 0, str(st3))
+
+    # 部分缺价（5/10）→ 数组能找到，usable=5、no_price=5 —— 这是 usable 真正管的场景
+    st4 = {}
+    mixed = []
+    for i in range(10):
+        it = {"wareId": str(i), "wareName": f"影驰RTX5070显卡{i} 12G"}
+        if i < 8:   # ⚠️ 形状判据要求可用元素 ≥ _PRODUCT_MIN(8)，8 有 / 2 无刚好过线
+            it["jdPrice"] = f"{6000 + i}.00"
+            it["realPrice"] = it["jdPrice"]
+        mixed.append(it)
+    _jd({"data": _json.dumps(mixed)}, st4)
+    check("② JD 部分缺价：result_count=10 而 usable=8、no_price=2",
+          st4.get("result_count") == 10 and st4.get("usable") == 8
+          and st4.get("no_price") == 2, str(st4))
+
+    # 改版信号的分段计数在源码里（elif result_count>0 and usable==0 分支）
+    jd_src = pathlib.Path("app/collectors/jd_source.py").read_text(encoding="utf-8")
+    check("② JD 改版信号细分已接线（「接口有商品但解析失败」）",
+          "接口有商品但解析失败" in jd_src
+          and 'stats.get("result_count", 0) > 0 and stats.get("usable", 0) == 0' in jd_src)
+
+    # ---------- ③ 闲鱼 ret 分类 ----------
+    from app.collectors.policy import AuthExpiredError as _AEE
+    from app.collectors.policy import RateLimitError as _RLE
+    from app.collectors.xianyu_source import parse_search_payload as _xy
+
+    ok_rows = _xy({"data": {"resultList": [{"data": {"item": {"main": {
+        "exContent": {"title": "RTX 5070 显卡", "area": "深圳", "itemId": "1"},
+        "clickParam": {"args": {"price": "6299", "id": "1",
+                                "publishTime": "1759000000000"}},
+        "targetUrl": "fleamarket://item?id=1", "userNickName": "老王"}}}}]}})
+    check("③ 闲鱼：正常响应不受 ret 检测影响", len(ok_rows) == 1)
+
+    try:
+        _xy({"ret": ["FAIL_SYS_SESSION_EXPIRED::令牌过期"], "data": {}})
+        check("③ 闲鱼：SESSION_EXPIRED → AuthExpiredError", False, "没抛异常")
+    except _AEE:
+        check("③ 闲鱼：SESSION_EXPIRED → AuthExpiredError", True)
+
+    try:
+        _xy({"ret": ["FAIL_SYS_ILLEGAL_ACCESS::非法访问"], "data": {}})
+        check("③ 闲鱼：ILLEGAL_ACCESS → RateLimitError（刷 cookie 救不了）",
+              False, "没抛异常")
+    except _RLE:
+        check("③ 闲鱼：ILLEGAL_ACCESS → RateLimitError（刷 cookie 救不了）", True)
+
+    check("③ 闲鱼：未知 ret 码不抛（向后兼容）",
+          _xy({"ret": ["SOME_UNKNOWN::x"], "data": {}}) == [])
+    check("③ 闲鱼：ret 是字符串时不崩（防御）",
+          _xy({"ret": "FAIL_SYS_TOKEN_EXOIRED::x", "data": {}}) == [])
+
+    # 常量内容钉住（含闲鱼后端拼写错误 EXOIRED）
+    from app.collectors.policy import AUTH_EXPIRED_CODES as _AE
+    from app.collectors.policy import RISK_CODES as _RC
+    check("③ AUTH_EXPIRED_CODES 含三个 token/session 码（EXOIRED 是闲鱼的拼写错误）",
+          {"FAIL_SYS_SESSION_EXPIRED", "FAIL_SYS_TOKEN_EXOIRED",
+           "FAIL_SYS_TOKEN_EMPTY"} <= set(_AE), str(sorted(_AE)))
+    check("③ RISK_CODES 含 ILLEGAL_ACCESS（fancyboi999 明确：刷 cookie 救不了）",
+          "FAIL_SYS_ILLEGAL_ACCESS" in _RC, str(sorted(_RC)))
+
+
 def test_registry_is_clean() -> None:
     """元守卫：测试注册表与定义必须一一对应。
 
@@ -3796,6 +3955,7 @@ def main() -> int:
         test_stage_counts,
         test_dedupe_identity,
         test_xianyu_api_parse,
+        test_blocked_snapshot_fix,
         test_registry_is_clean,
         test_failure_triage,
         test_breaker_auth_channel,

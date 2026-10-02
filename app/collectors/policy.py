@@ -44,6 +44,22 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("diyprice.policy")
 
 
+# 闲鱼 mtop `ret` 字段的纯错误码（取 `::` 前的串）
+# 依据 fancyboi999/goofish-cli core/mtop.py:141-177（已读代码确认）
+AUTH_EXPIRED_CODES = frozenset({
+    "FAIL_SYS_SESSION_EXPIRED",   # session 过期（刷 cookie 可救）
+    "FAIL_SYS_TOKEN_EXOIRED",     # token 过期（闲鱼后端拼写：EXOIRED 不是 EXPIRED）
+    "FAIL_SYS_TOKEN_EMPTY",       # token 为空
+})
+# 风控类 —— 刷 cookie 救不了，必须抛 RateLimitError
+RISK_CODES = frozenset({
+    "FAIL_SYS_ILLEGAL_ACCESS",     # 非法访问（风控层）
+    "FAIL_SYS_RATE_LIMIT",
+    "RGV587_ERROR",
+    "FAIL_SYS_USER_VALIDATE",
+})
+
+
 class RateLimitError(RuntimeError):
     """命中平台限流特征（**风控**）。
 
@@ -722,13 +738,30 @@ def _snapshot_blocked(page, code: str | None, indicator: str) -> str:
 
         outdir = _Path(DATA_DIR) / _BLOCKED_DIR_NAME
         outdir.mkdir(parents=True, exist_ok=True)
-        name = f"{code or 'unknown'}-{_time.strftime('%Y%m%d-%H%M%S')}"
+        # ⚠️ 文件名带毫秒：60 秒节流窗口内不会重复，但**测试**会清空节流表 ——
+        # 秒级精度下同一秒的两次调用会同名互相覆盖。
+        # ⚠️ 文件名带毫秒：60 秒节流窗口内不会重复，但**测试**会清空节流表 ——
+        # 秒级精度下同一秒的两次调用会同名互相覆盖。
+        name = f"{code or 'unknown'}-{_time.strftime('%Y%m%d-%H%M%S')}-{__import__('uuid').uuid4().hex[:6]}"
+        html = ""
+        # ⚠️ 2026-10-02 修：`page.content()` 在限流页常抛异常（页面已关闭/导航
+        #    中断），旧实现 `except: pass` 让 html 留空但**照样写 0 字节 .html** ——
+        #    实测 80 个留存里 35 个是空文件，污染现场、误导排障。
+        #    改：① content() 失败时用 `evaluate("document.documentElement.outerHTML")`
+        #    兜底（content 走 CDP、evaluate 走 page，一个通另一个往往通）；
+        #    ② 两个都失败 → 只写 .json 标注「无现场」，不写空 .html。
         html = ""
         try:
             html = page.content()[:12000]
         except Exception:  # noqa: BLE001
-            pass
-        (outdir / f"{name}.html").write_text(html, encoding="utf-8", errors="ignore")
+            try:
+                html = page.evaluate(
+                    "() => document.documentElement ? document.documentElement.outerHTML.slice(0, 12000) : ''"
+                ) or ""
+            except Exception:  # noqa: BLE001 —— 排障辅助绝不能影响采集
+                html = ""
+        if html:
+            (outdir / f"{name}.html").write_text(html, encoding="utf-8", errors="ignore")
         (outdir / f"{name}.json").write_text(
             __import__("json").dumps(
                 {
@@ -737,6 +770,8 @@ def _snapshot_blocked(page, code: str | None, indicator: str) -> str:
                     "url": _page_url(page)[:400],
                     "at": _time.strftime("%Y-%m-%d %H:%M:%S"),
                     "html_bytes": len(html),
+                    "html_source": "content" if html else "none",
+                    "note": "" if html else "页面已关闭，无法抓取现场 HTML",
                 },
                 ensure_ascii=False, indent=1,
             ),

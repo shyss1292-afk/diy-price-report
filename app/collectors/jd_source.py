@@ -164,6 +164,13 @@ def parse_search_payload(payload: object, stats: dict | None = None) -> list[dic
         # 单看"rows == 0"区分不出「没货」和「字段改了」—— 有了这个布尔量，
         # 下一次改版在日志里一眼可见。
         stats["found"] = bool(items)
+        # 2026-10-02：result_count = 接口返回的商品总数（= len(items)）。
+        # 与 usable（解析出有效价格+标题的条数）对比，就能区分三种 0 条成因：
+        #   · result_count = 0            → 真无货
+        #   · result_count > 0, usable=0  → 改版/字段挪了（收到了货但解析不出）
+        #   · 没收到载荷                   → 被限流/网络问题
+        # 依据 ShilongLee/Crawler 的 result_count 交叉校验 —— 我们直接从 JSON 取。
+        stats["result_count"] = len(items or [])
     if not items:
         return []
 
@@ -199,6 +206,8 @@ def parse_search_payload(payload: object, stats: dict | None = None) -> list[dic
             "ori_price": str(item.get("oriPrice") or ""),
             "stock": str(item.get("stock") or ""),
         })
+    if stats is not None:
+        stats["usable"] = len(rows)
     return rows
 
 
@@ -351,6 +360,10 @@ class JdCollector(BaseCollector):
         # 没有它，京东改一次字段名，我们只会看到"数据变少了"，无从知道为什么。
         if captured.get("body") and stats.get("found") is False:
             note_stage("接口有载荷但无商品数组")
+        elif stats.get("result_count", 0) > 0 and stats.get("usable", 0) == 0:
+            # 接口**收到了 N 条商品**但一条都解析不出 —— 比"无商品数组"更细的
+            # 改版信号（字段还在但形状变了，如 wareId 改名成 skuId）
+            note_stage("接口有商品但解析失败")
             logger.warning(
                 "京东 %s 收到了 %d 字节的接口载荷，但**识别不出商品数组** —— "
                 "疑似京东改了字段结构，请检查 `_find_product_list` 的形状判据"
