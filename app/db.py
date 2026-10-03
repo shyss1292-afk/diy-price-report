@@ -145,6 +145,7 @@ def _migrate() -> None:
     additions = [
         ("listings", "is_synthetic", "BOOLEAN NOT NULL DEFAULT 0"),
         ("listings", "batch", "VARCHAR(16) NOT NULL DEFAULT ''"),
+        ("listings", "quality_flags", "VARCHAR(32) NOT NULL DEFAULT ''"),
     ]
     with engine.begin() as conn:
         for table, column, ddl in additions:

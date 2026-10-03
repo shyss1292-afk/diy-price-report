@@ -147,6 +147,11 @@ class MockCollector(BaseCollector):
     code = "mock"
     name = "模拟数据源"
 
+    # 不参与默认轮次 —— 见 BaseCollector.is_default_source 的说明。
+    # 要生成模拟数据（打通链路 / 做演示）时显式指定：
+    #     python -m app.cli collect --sources mock
+    is_default_source = False
+
     def __init__(self) -> None:
         self.market = MockMarket()
 

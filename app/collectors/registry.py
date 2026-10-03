@@ -22,9 +22,16 @@ def register(cls: type[BaseCollector]) -> type[BaseCollector]:
 
 
 def get_collectors(codes: list[str] | None = None) -> list[BaseCollector]:
-    """按 code 取出适配器实例；codes 为 None 时返回全部。"""
+    """按 code 取出适配器实例。
+
+    `codes is None`（即默认轮次）时只返回 **`is_default_source` 为真**的适配器
+    —— 把 Mock 这类开发工具挡在生产轮次之外。
+    ⚠️ 2026-10-03：此前返回全部，导致 Mock 源每轮都给「没有真实采集器却
+       `is_active=1`」的平台灌 1000+ 条模拟数据。
+    需要 Mock（演示 / 打通链路）时显式传 ``codes=["mock"]``。
+    """
     if codes is None:
-        return list(_REGISTRY.values())
+        return [c for c in _REGISTRY.values() if getattr(c, "is_default_source", True)]
     return [_REGISTRY[c] for c in codes if c in _REGISTRY]
 
 

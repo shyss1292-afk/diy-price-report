@@ -36,6 +36,17 @@ class BaseCollector(abc.ABC):
     code: str = ""
     name: str = ""
 
+    # 是否属于「默认轮次」的采集源。
+    #
+    # ⚠️ 2026-10-03：Mock 源此前**每轮都被默认调用** —— 它给没有真实采集器的
+    #    平台（mmb 慢慢买 / tmall 天猫 / zhuanzhuan 转转）每天灌 1000+ 条模拟数据
+    #    （实测单轮 1025 条）。而这些平台 `is_active=1`：任何漏掉 `is_synthetic=0`
+    #    的查询都会被污染，前端按平台展示时也会把它们当成真实行情。
+    #    Mock 是**开发/测试工具**，不该参与生产轮次。
+    #
+    #    ⇒ 默认 True；Mock 源置 False，只有显式 `--sources mock` 才跑。
+    is_default_source: bool = True
+
     @property
     def supported_platforms(self) -> list[str] | None:
         """该适配器负责的平台 code 列表；None 表示全部平台。"""

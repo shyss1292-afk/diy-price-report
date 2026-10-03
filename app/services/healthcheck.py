@@ -416,6 +416,36 @@ def _tcp_ok(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
+# 采集目标 —— 前置检查必须探**这些**，而不是随便一个网站。
+#
+# ⚠️ 2026-10-03 教训（白丢 17 轮 / 约 26 小时）：
+#    原先的「基础连通性」判据探的是**公共 DNS 的 TCP 53 端口**
+#    （`_tcp_ok("223.5.5.5", 53) and _tcp_ok("1.1.1.1", 53)`）。两个问题：
+#      · "能上网" ≠ "能连外部 DNS 的 53 端口" —— 公司网 / 路由器策略 /
+#        运营商策略常拦外部 DNS，但 HTTP/HTTPS 完全正常；
+#      · `1.1.1.1:53` 在国内**本来就长期不通**（本机实测 False），
+#        这个判据实际只押在 223.5.5.5 一个点上。
+#    结果：那段时间 HTTP 目标全通（实测 curl 200），却被判"没网"，整轮早退。
+#
+# ⇒ 判据必须与**采集浏览器真正走的路径**一致。它走的是这几个域的 HTTP(S)。
+_PROBE_TARGETS = (
+    ("jd", "https://search.jd.com/"),
+    ("xianyu", "https://www.goofish.com/"),
+    ("pdd", "https://mobile.yangkeduo.com/"),
+)
+
+
+def probe_targets(timeout: float = 6.0) -> tuple[bool, dict]:
+    """探真实采集目标。返回 (是否有任一个可达, 每个目标的明细)。
+
+    任一可达即认为网络可用 —— 单点失败可能是平台侧抖动，不该拦整轮。
+    """
+    results: dict = {}
+    for code, url in _PROBE_TARGETS:
+        results[code] = _http_ok(url=url, timeout=timeout)
+    return any(results.values()), results
+
+
 def _http_ok(proxy_host: str = "", proxy_port: int = 0,
              url: str = "https://www.baidu.com", timeout: float = 6.0) -> bool:
     """发一个**真实 HTTP 请求**，走指定的代理（或显式不走代理）。
@@ -468,6 +498,12 @@ def preflight() -> dict:
        （见 `session.browser_proxy_args()`），**不再继承系统代理**。
        所以这里以「浏览器实际走的那条路」为准去探；系统代理状态仍然记录在
        detail 里供排查，但**不再据此拦轮次** —— 那正是 22:30 白丢一整轮的原因。
+
+       🔧 2026-10-03 改：连通性判据从「公共 DNS 的 53 端口」换成
+          「**真实采集目标**（京东/闲鱼/拼多多的 HTTP）」。旧判据把
+          "能上网但连不上外部 DNS 53"（公司网/路由器策略常见）误判成断网，
+          白丢 17 轮约 26 小时。**判据必须与采集浏览器真正走的路径一致。**
+          DNS 53 探活降级为 detail 记录，不参与判定。
     """
     from .session import browser_proxy_args
 
@@ -505,9 +541,36 @@ def preflight() -> dict:
         if proxy["enabled"]:
             detail["system_proxy_ignored"] = True
 
-    # 基础连通性：直连探公共 DNS 端口
-    if not _tcp_ok("223.5.5.5", 53, timeout=3.0) and not _tcp_ok("1.1.1.1", 53, timeout=3.0):
-        problems.append("基础网络不通（223.5.5.5:53 与 1.1.1.1:53 都连不上）")
+    # ---- 基础连通性：探**真实采集目标** ----
+    #
+    # ⚠️ 2026-10-03 改：旧判据探公共 DNS 的 53 端口，把「能上网但连不上外部
+    #    DNS 53」误判成断网，白丢 17 轮（约 26 小时）。判据必须与采集路径一致。
+    targets_ok, targets_detail = probe_targets()
+    detail["targets"] = targets_detail
+    if not targets_ok:
+        # 全都不通 —— 再探一个中立站点，用来区分两类完全不同的故障：
+        #   · 中立站点也不通  → 本机确实断网（检查 Wi-Fi / 热点）
+        #   · 中立站点通      → 本机有网，是采集目标侧不可达（平台故障 / DNS 劫持）
+        neutral_ok = _http_ok(timeout=6.0)
+        detail["neutral_probe"] = neutral_ok
+        if neutral_ok:
+            problems.append(
+                "采集目标全部不可达（京东/闲鱼/拼多多），但中立站点可达 —— "
+                "本机网络正常，疑为平台侧故障或 DNS 劫持；本轮跳过"
+            )
+        else:
+            problems.append(
+                "直连上不了网（采集目标与中立站点都不可达）—— "
+                "采集浏览器已配 --no-proxy-server，检查 Wi-Fi / 热点"
+            )
+
+    # DNS 53 端口的可访问性 —— **只记录，不拦轮次**。
+    # ⚠️ 它是 2026-10-03 那次误判的来源；保留只为排障时能一眼看到
+    #    "网络正常但外部 DNS 被拦"这种环境特征。注意 1.1.1.1:53 在国内长期不通。
+    detail["dns53"] = {
+        "223.5.5.5": _tcp_ok("223.5.5.5", 53, timeout=2.0),
+        "1.1.1.1": _tcp_ok("1.1.1.1", 53, timeout=2.0),
+    }
 
     return {
         "ok": not problems,

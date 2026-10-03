@@ -103,6 +103,10 @@ class Listing(Base):
     condition: Mapped[str] = mapped_column(String(16), default="全新")
     url: Mapped[str] = mapped_column(Text, default="")
     seller: Mapped[str] = mapped_column(String(64), default="")
+    # 报价质量标记（逗号分隔）：bundle / defective —— 见 collectors/quality.py。
+    # 「价格不能代表这个型号行情」的条目（多商品捆绑列表、坏卡）在此留痕，
+    # **不静默丢弃**：统计侧可据此排除，排障时可原样查回来。
+    quality_flags: Mapped[str] = mapped_column(String(32), default="")
     # 数据血缘：True = 模拟生成，False = 真实采集。
     # 为什么必须有：真实平台（jd/pdd/xianyu）在接入真实适配器之前，
     # 历史数据是 mock 写进同名平台的 —— 只按平台名过滤无法区分真假，

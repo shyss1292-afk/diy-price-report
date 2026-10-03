@@ -32,6 +32,7 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session
 
 from ..collectors import get_collectors
+from ..collectors import quality
 from ..config import BACKFILL_DAYS
 from ..db import init_db, session_scope
 from ..models import CrawlLog, Listing, Platform, PriceDaily, Product
@@ -682,6 +683,13 @@ def run_pipeline(
                                 # 报告层据此过滤，避免模拟价污染「史低价/最低平台」。
                                 "is_synthetic": collector.code == "mock",
                                 "batch": batch_id,
+                                # 质量标记：「价格不能代表这个型号行情」的条目留痕
+                                # （多商品捆绑列表 bundle / 坏卡 defective）。
+                                # 为什么在这里做：型号归属只看标题关键词，一条挂 5 个
+                                # 型号的批发列表会被归到每个型号名下，其价格（往往是
+                                # 最便宜那款的起价）就成了假「历史最低」。
+                                # 标记而不丢弃 —— 数据可追溯，统计侧自行排除。
+                                "quality_flags": ",".join(quality.classify(q.title_raw)),
                             }
                         )
                         # ---- 单品快照（粒度：平台 × 挂牌 id × 日期）----

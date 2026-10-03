@@ -3909,6 +3909,198 @@ def test_blocked_snapshot_fix() -> None:
           "FAIL_SYS_ILLEGAL_ACCESS" in _RC, str(sorted(_RC)))
 
 
+def test_preflight_probes_targets() -> None:
+    """前置检查的连通性判据必须探**真实采集目标**，不能探 DNS 53 端口。
+
+    守住的事故（2026-10-02 18:32 → 10-03 18:37，连续 17 轮、约 26 小时 0 采集）：
+      旧判据 `_tcp_ok("223.5.5.5",53) and _tcp_ok("1.1.1.1",53)` 探公共 DNS 的
+      TCP 53 端口。两个问题：
+        · "能上网" ≠ "能连外部 DNS 的 53 端口"（公司网/路由器策略常拦）；
+        · `1.1.1.1:53` 在国内**本来就长期不通**（实测 False）—— 判据实际只押
+          223.5.5.5 一个点。
+      而同期 HTTP 采集目标全通（curl 全 200）。判据与真实路径不一致 → 误判即白丢整轮。
+    """
+    import pathlib
+
+    from app.services import healthcheck as H
+
+    check("前置检查定义了采集目标清单", hasattr(H, "_PROBE_TARGETS")
+          and len(H._PROBE_TARGETS) >= 3, str(getattr(H, "_PROBE_TARGETS", None)))
+
+    codes = [c for c, _ in H._PROBE_TARGETS]
+    check("采集目标覆盖三个真实源（jd/xianyu/pdd）",
+          {"jd", "xianyu", "pdd"} <= set(codes), str(codes))
+
+    src = pathlib.Path("app/services/healthcheck.py").read_text(encoding="utf-8")
+
+    # 旧判据必须消失 —— 它只在 detail 里作为「记录」保留
+    check("旧的 DNS53 判据不再参与拦轮次（不出现 problems.append 里）",
+          "223.5.5.5:53 与 1.1.1.1:53 都连不上" not in src)
+    check("DNS53 探活降级为 detail 记录",
+          'detail["dns53"]' in src and '"223.5.5.5": _tcp_ok' in src)
+    check("判据改为探采集目标", "probe_targets()" in src
+          and 'detail["targets"] = targets_detail' in src)
+
+    # 两类故障要能区分
+    check("全不通时用中立站点区分「本机断网」与「目标站不可达」",
+          'detail["neutral_probe"]' in src
+          and "疑为平台侧故障或 DNS 劫持" in src
+          and "检查 Wi-Fi / 热点" in src)
+
+    # ---- 行为验证：DNS53 全不通时**不能**拦 ----
+    dead_dns = {"enabled": False, "host": "", "port": 0}
+    with mock.patch.object(H, "_system_proxy", return_value=dead_dns), \
+         mock.patch.object(H, "probe_targets", return_value=(True, {"jd": True})), \
+         mock.patch.object(H, "_tcp_ok", return_value=False):   # 两个 DNS 都探不通
+        r = H.preflight()
+    check("DNS53 全不通 + 采集目标可达 → 放行（这正是白丢 26 小时的场景）",
+          r["ok"] is True and not r["problems"],
+          f"ok={r['ok']} problems={r['problems']}")
+    check("DNS53 状态仍被记录（供排障）", r.get("dns53") == {"223.5.5.5": False, "1.1.1.1": False},
+          str(r.get("dns53")))
+
+    # ---- 采集目标全不通 + 中立站点也不通 → 必须拦 ----
+    with mock.patch.object(H, "_system_proxy", return_value=dead_dns), \
+         mock.patch.object(H, "probe_targets",
+                           return_value=(False, {"jd": False, "xianyu": False, "pdd": False})), \
+         mock.patch.object(H, "_http_ok", return_value=False):
+        r2 = H.preflight()
+    check("采集目标与中立站点都不可达 → 拦下（本机断网）",
+          r2["ok"] is False and any("检查 Wi-Fi" in p for p in r2["problems"]),
+          f"problems={r2['problems']}")
+
+    # ---- 采集目标全不通但中立站点通 → 拦，但归因是「平台侧」而非「本机断网」----
+    with mock.patch.object(H, "_system_proxy", return_value=dead_dns), \
+         mock.patch.object(H, "probe_targets",
+                           return_value=(False, {"jd": False, "xianyu": False, "pdd": False})), \
+         mock.patch.object(H, "_http_ok", return_value=True):
+        r3 = H.preflight()
+    check("采集目标不可达但中立站点通 → 判为平台侧故障（区分两类故障）",
+          r3["ok"] is False and any("平台侧故障" in p for p in r3["problems"]),
+          f"problems={r3['problems']}")
+
+
+def test_mock_not_in_default_round() -> None:
+    """Mock 源不得参与默认轮次。
+
+    守住的事故（2026-10-03）：`get_collectors(None)` 返回**全部**注册采集器，
+    含 `mock`。而 MockCollector 的 REAL_PLATFORMS 不含 mmb(慢慢买)/tmall(天猫)/
+    zhuanzhuan(转转) —— 于是它每轮都给这三个「没有真实采集器却 is_active=1」的
+    平台灌模拟数据（实测单轮 1025 条）。这些平台在 API/前端会被当成真实行情，
+    且任何漏掉 `is_synthetic=0` 的查询都会被污染。
+    """
+    import pathlib
+
+    from app.collectors import available_codes, get_collectors
+
+    all_codes = available_codes()
+    default = [c.code for c in get_collectors(None)]
+
+    check("mock 仍在注册表里（演示/打通链路要用）", "mock" in all_codes, str(all_codes))
+    check("默认轮次不含 mock", "mock" not in default, str(default))
+    check("默认轮次含三个真实源", {"jd", "pdd", "xianyu"} <= set(default), str(default))
+    check("显式指定 mock 仍然取得到（不能被误删）",
+          [c.code for c in get_collectors(["mock"])] == ["mock"])
+
+    # 结构性：标记必须来自类属性，而不是硬编码在 registry 里
+    from app.collectors.base import BaseCollector
+    check("BaseCollector 有 is_default_source 属性且默认 True",
+          getattr(BaseCollector, "is_default_source", None) is True)
+    from app.collectors.mock_source import MockCollector
+    check("MockCollector 把它置为 False", MockCollector.is_default_source is False)
+
+
+def test_quote_quality_flags() -> None:
+    """报价质量标记 —— 「价格不能代表这个型号行情」的条目要留痕。
+
+    由用户的提问引出：「RTX 4060 8G 历史最低 899 对吗？跌了 43%？现在 1299？」
+    三个数全不对 —— 899 是多商品捆绑列表里「梅捷1650 4GD6 899元」的价格，
+    1299 是标题写着「无法点亮」的坏卡。
+
+    ⚠️ 判据是**逐词在真实库上核对误杀率**得出的，不是拍脑袋。测试里同时钉住
+    「该标的」与「不该标的」（误杀回归）。
+    """
+    import pathlib
+
+    from app.collectors import quality as Q
+
+    # ---- bundle：≥3 处「N元」----
+    real_899 = ("全新未拆封梅捷5070 12GD7 焱龙双扇白色6449元， 全新三年保梅捷RTX4060 8G白色 "
+                "2579元， 全新三年保梅捷GTX2060S 8GD6显卡1439元， 全新三年保梅捷1660S 6GD6 1119元， "
+                "全新三年保梅捷1650 4GD6 899元")
+    check("bundle：真实的多商品列表被判 bundle（899 的来源）",
+          "bundle" in Q.classify(real_899), str(Q.classify(real_899)))
+
+    # ⚠️ 误杀回归：卖家**议价叙述**里的两个价不是多商品列表
+    check("bundle：两个价（议价叙述）不判 bundle —— 阈值必须是 3",
+          "bundle" not in Q.classify("铭瑄ARC B580 电竞之星 1999元，现在1950元出，无拆无修"),
+          str(Q.classify("铭瑄ARC B580 电竞之星 1999元，现在1950元出")))
+    check("bundle：同一个价重复两次不判 bundle",
+          "bundle" not in Q.classify("技嘉RX 7800 XT 已经有多人出到3100元。3100元不刀"))
+    check("bundle：无价格描述的普通标题不判",
+          Q.classify("技嘉RTX4060魔鹰OC 8G显卡 三风扇散热 成色很新") == ())
+
+    # ---- defective：坏卡 ----
+    check("defective：标题写「无法点亮」的 4060 被判（1299 的来源）",
+          "defective" in Q.classify("七彩虹iGame RTX4060 8G显卡，白色双风扇 图四图五有瑕疵 无法点亮。看好再买"))
+    # ⚠️ **逐词隔离**：每条样本只含**一个**受测词。
+    #    第一版写成一串含多个词的句子 → 删掉任一词仍有其它词命中 → 测不出
+    #    （反向验证实测：删掉「坏卡」整条断言照样通过）。
+    # ⚠️ 注意：每条样本**必须含它对应的那个词**，只去掉**其它**受测词。
+    #    第一版把词一起删了（写成"索泰 RTX2060 实物拍摄"），于是全都不命中。
+    WORDS_ISOLATED = [
+        ("无法点亮", "自用i3-12100F 闲置半年 上机测试无法点亮 售出不退不换"),
+        ("坏卡", "索泰 RTX2060 6G显卡 坏卡 实物拍摄 三风扇 成色看图"),
+        ("坏显卡", "微星 radeon RX 6600 8G 坏显卡 实物拍摄 有两个一起出"),
+        ("当坏件", "微星 RX6600 8G 不知道什么问题 当坏件处理 顺丰到付"),
+        ("坏的坏的", "微星RTX3090 AERO 24G 坏的坏的 无修 包邮 同城可自提"),
+        ("故障配件", "自用i3-12100F 二手故障配件 适合懂维修的玩家"),
+        ("点不亮", "蓝宝石RX6600显卡8G 有点问题的 有时候点不亮 售出不退"),
+    ]
+    miss = [f"{w} → {Q.classify(t)}" for w, t in WORDS_ISOLATED
+            if "defective" not in Q.classify(t)]
+    check(f"defective：{len(WORDS_ISOLATED)} 个词逐个单独命中（隔离用例，不互相遮蔽）",
+          not miss, "; ".join(miss))
+    check("defective：重复强调「坏的坏的」被判",
+          "defective" in Q.classify("微星RTX3090 AERO 24G显卡，坏的坏的坏的。无修"))
+
+    # ⚠️ 误杀回归（全部是实测踩过的坑）
+    FALSE_ALARMS = [
+        ("无核心重植", "微星RTX 4070 SUPER万图师 12G显存，核心频率2520MHz 无暗病无维修无核心重植，非矿卡"),
+        ("无卡顿", "AMD锐龙5 7500F六核CPU，功能正常，插上就能用，极高画质打黑猴无卡顿"),
+        ("修不了换的", "全新未拆封耕升5050 8g显卡，官换来的，4060修不了换的这张5050，插上就能用"),
+        ("风扇坏的", "蓝宝石PURE RX7900XT极地版白色三风扇显卡，风扇坏的！！！！其他功能正常"),
+        ("显卡支架", "万丽星云RTX4070 Super 12G，箱说齐全，自带原装显卡支架"),
+        ("配件齐全", "Intel Core Ultra 9 285K 功能正常，无拆无修无暗病 成色如图，原盒在，配件齐全"),
+        ("正常商品", "技嘉RTX4060魔鹰OC 8G显卡 三风扇散热 约28.3cm卡长 4个HDMI/DP接口 成色很新"),
+    ]
+    bad = []
+    for label, title in FALSE_ALARMS:
+        f = Q.classify(title)
+        if f:
+            bad.append(f"{label} → {f}")
+    check(f"defective：{len(FALSE_ALARMS)} 条正常商品一条都不能误标（误杀回归）",
+          not bad, "; ".join(bad))
+
+    # ---- is_suspect 的两种输入形态 ----
+    check("is_suspect 吃字符串（从库里读出的形式）",
+          Q.is_suspect("bundle") and Q.is_suspect("defective,bundle")
+          and not Q.is_suspect("") and not Q.is_suspect(None))
+    check("is_suspect 吃序列", Q.is_suspect(("defective",)) and not Q.is_suspect(()))
+
+    # ---- 接线 ----
+    pl = pathlib.Path("app/services/pipeline.py").read_text(encoding="utf-8")
+    check("pipeline 在构造 listings 行时打标",
+          '"quality_flags": ",".join(quality.classify(q.title_raw))' in pl)
+    check("pipeline 导入了 quality", "from ..collectors import quality" in pl)
+
+    db = pathlib.Path("app/db.py").read_text(encoding="utf-8")
+    check("迁移登记了 listings.quality_flags",
+          '("listings", "quality_flags"' in db)
+    md = pathlib.Path("app/models.py").read_text(encoding="utf-8")
+    check("模型有 quality_flags 列", "quality_flags: Mapped[str]" in md)
+
+
 def test_registry_is_clean() -> None:
     """元守卫：测试注册表与定义必须一一对应。
 
@@ -3956,6 +4148,9 @@ def main() -> int:
         test_dedupe_identity,
         test_xianyu_api_parse,
         test_blocked_snapshot_fix,
+        test_preflight_probes_targets,
+        test_mock_not_in_default_round,
+        test_quote_quality_flags,
         test_registry_is_clean,
         test_failure_triage,
         test_breaker_auth_channel,
