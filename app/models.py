@@ -136,6 +136,10 @@ class PriceDaily(Base):
     )
     trade_date: Mapped[date] = mapped_column(Date, index=True)
     min_price: Mapped[float] = mapped_column(Float)
+    # 稳健底价（25 分位）—— 见 aggregate.py 的「为什么要 p25」。
+    # 保留 min_price 是原始量（"最低多少钱能买到"），p25 专供**涨跌幅/分位**等
+    # 对离群值敏感的统计量。默认 0 仅为兼容旧行，聚合会立刻覆盖。
+    p25_price: Mapped[float] = mapped_column(Float, default=0.0)
     max_price: Mapped[float] = mapped_column(Float)
     avg_price: Mapped[float] = mapped_column(Float)
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -232,3 +236,50 @@ class CrawlLog(Base):
         if self.finished_at is None:
             return None
         return round((self.finished_at - self.started_at).total_seconds(), 2)
+
+
+class Build(Base):
+    """一套装机配置单。
+
+    这是**用户数据**，不是行情数据 —— 所以和 listings/price_daily 分开存：
+    配置单跟着用户走（他存了几套），价格每小时变。混在一起会让
+    "清行情缓存" 和 "改配置" 互相牵连。
+
+    总价不落库。价格是算出来的（每次现算三平台最低价），
+    落库会立刻过期 —— 存一个"昨天的总价"比不存更糟。
+    """
+
+    __tablename__ = "builds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    note: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    items: Mapped[list["BuildItem"]] = relationship(
+        back_populates="build",
+        cascade="all, delete-orphan",
+        order_by="BuildItem.id",
+    )
+
+
+class BuildItem(Base):
+    """配置单里的一件配件。"""
+
+    __tablename__ = "build_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    build_id: Mapped[int] = mapped_column(
+        ForeignKey("builds.id", ondelete="CASCADE"), index=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), index=True
+    )
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    # 备注：自用场景很有用 —— "二手也行" / "等 618" / "已有，不用买"
+    note: Mapped[str] = mapped_column(String(120), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    build: Mapped[Build] = relationship(back_populates="items")
+    product: Mapped[Product] = relationship()

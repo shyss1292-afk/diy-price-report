@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>帧配装机 · 价格数据接入说明</title>
+<style>
+  :root{
+    --ink:#0f1b2d; --ink2:#42526e; --ink3:#7a89a4;
+    --line:#e3e9f3; --bg:#f5f7fb; --card:#fff;
+    --accent:#2563eb; --accent-soft:#eef4ff;
+    --ok:#0d9e6a; --warn:#b45309; --warn-soft:#fef6e7;
+    --code-bg:#0f1b2d; --code-ink:#e6edf7;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:40px 22px 80px}
+  header h1{margin:0 0 6px; font-size:26px; letter-spacing:-.3px}
+  header .sub{color:var(--ink3); font-size:14px}
+  .lead{
+    margin:22px 0 30px; padding:18px 20px; background:var(--accent-soft);
+    border:1px solid #cfe0ff; border-radius:12px;
+  }
+  .lead b{color:var(--accent)}
+  h2{
+    margin:40px 0 14px; font-size:19px; padding-bottom:8px;
+    border-bottom:1px solid var(--line);
+  }
+  h3{margin:24px 0 8px; font-size:15px; color:var(--ink2)}
+  p{margin:10px 0}
+  code{
+    font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.88em;
+    background:var(--accent-soft); color:#1e40af; padding:1px 6px; border-radius:5px;
+  }
+  pre{
+    background:var(--code-bg); color:var(--code-ink); padding:16px 18px;
+    border-radius:10px; overflow:auto; font-size:13px; line-height:1.65;
+    font-family:"SF Mono",Menlo,Consolas,monospace;
+  }
+  pre code{background:none; color:inherit; padding:0; font-size:inherit}
+  table{width:100%; border-collapse:collapse; margin:14px 0; font-size:14px}
+  th,td{padding:9px 11px; border:1px solid var(--line); text-align:left; vertical-align:top}
+  th{background:#f0f4fa; font-weight:600; color:var(--ink2); white-space:nowrap}
+  td code{font-size:12.5px}
+  .pill{
+    display:inline-block; font-size:11.5px; font-weight:600; padding:2px 8px;
+    border-radius:999px; letter-spacing:.3px;
+  }
+  .get{background:#e8f7f1; color:var(--ok)}
+  .post{background:#eef4ff; color:var(--accent)}
+  .del{background:#fdeced; color:#c0392b}
+  .note{
+    margin:16px 0; padding:14px 16px; border-radius:10px;
+    background:var(--warn-soft); border:1px solid #f3d9a6; color:#7c4a03; font-size:14px;
+  }
+  .note b{color:#7c4a03}
+  ul{margin:10px 0; padding-left:22px}
+  li{margin:5px 0}
+  .step{counter-reset:none}
+  .kv{display:grid; grid-template-columns:120px 1fr; gap:6px 14px; margin:12px 0; font-size:14px}
+  .kv dt{color:var(--ink3)}
+  .kv dd{margin:0}
+  footer{margin-top:50px; padding-top:18px; border-top:1px solid var(--line); color:var(--ink3); font-size:13px}
+  @media print{
+    body{background:#fff}
+    pre{background:#f6f8fc; color:#0f1b2d; border:1px solid var(--line)}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>帧配装机 · 价格数据接入说明</h1>
+  <div class="sub">把 DIY 价格追踪的数据接到小程序里 · 2026-10-04</div>
+</header>
+
+<div class="lead">
+  <b>结论：不用域名、不用备案，今天就能连上。</b><br>
+  微信官方文档写明：小程序「网络接口只允许与<b>同个局域网内的非本机 IP</b>以及配置过的服务器域名通信」
+  （基础库 2.4.0 起支持局域网 IP）。所以只要<b>手机和电脑连同一个 WiFi</b>，
+  小程序就能直接请求电脑上的服务。出门在外（不同网络）才需要公网的 HTTPS + 备案域名。
+</div>
+
+<h2>一、先确认数据是通的（1 分钟）</h2>
+<ol>
+  <li>手机上连上和电脑<b>同一个 WiFi</b>。</li>
+  <li>手机浏览器打开：
+    <pre><code>http://192.168.1.18:8848/build</code></pre>
+  </li>
+  <li>能看到「我的主机 ¥9,184」这张卡片，就说明数据链路已经通了 —— 剩下只是把请求搬进小程序。</li>
+</ol>
+<div class="note">
+  <b>IP 可能变。</b>电脑的局域网 IP 由路由器分配，重连 WiFi 或重启路由器后可能变化。
+  在电脑上执行 <code>ipconfig getifaddr en0</code> 可以查到当前的；如果长期用，建议在路由器里给它绑定固定 IP。
+</div>
+
+<h2>二、接口清单</h2>
+<p>所有接口都在 <code>http://&lt;电脑IP&gt;:8848</code> 下，请求和响应都是 JSON（UTF-8）。</p>
+
+<table>
+  <tr><th>方法</th><th>路径</th><th>用途</th><th>请求体</th></tr>
+  <tr>
+    <td><span class="pill get">GET</span></td>
+    <td><code>/api/builds</code></td>
+    <td>所有配置单 + 实时总价</td>
+    <td>—</td>
+  </tr>
+  <tr>
+    <td><span class="pill post">POST</span></td>
+    <td><code>/api/builds</code></td>
+    <td>新建配置单</td>
+    <td><code>{"name":"我的主机","note":""}</code></td>
+  </tr>
+  <tr>
+    <td><span class="pill post">POST</span></td>
+    <td><code>/api/builds/{id}</code></td>
+    <td>改名 / 改备注</td>
+    <td><code>{"name":"…","note":"…"}</code></td>
+  </tr>
+  <tr>
+    <td><span class="pill del">DELETE</span></td>
+    <td><code>/api/builds/{id}</code></td>
+    <td>删除整套配置</td>
+    <td>—</td>
+  </tr>
+  <tr>
+    <td><span class="pill post">POST</span></td>
+    <td><code>/api/builds/{id}/items</code></td>
+    <td>往配置里加配件</td>
+    <td><code>{"product_id":101,"quantity":1}</code></td>
+  </tr>
+  <tr>
+    <td><span class="pill post">POST</span></td>
+    <td><code>/api/build-items/{itemId}</code></td>
+    <td>改数量 / 改备注</td>
+    <td><code>{"quantity":2}</code></td>
+  </tr>
+  <tr>
+    <td><span class="pill del">DELETE</span></td>
+    <td><code>/api/build-items/{itemId}</code></td>
+    <td>移除一个配件</td>
+    <td>—</td>
+  </tr>
+  <tr>
+    <td><span class="pill get">GET</span></td>
+    <td><code>/api/products?q=5060&amp;limit=20</code></td>
+    <td>搜型号（加配件时用）</td>
+    <td>—</td>
+  </tr>
+</table>
+
+<div class="note">
+  <b>⚠️ 改数据请用 POST，不要用 PATCH。</b>
+  小程序的 <code>wx.request</code> 的 <code>method</code> 只支持
+  <code>OPTIONS / GET / HEAD / POST / PUT / DELETE / TRACE / CONNECT</code>，<b>没有 PATCH</b>。
+  服务端已经把「改」类接口同时挂上了 POST，两个都能用 —— 网页端走 PATCH，小程序走 POST。
+</div>
+
+<h2>三、返回结构（<code>GET /api/builds</code>）</h2>
+
+<pre><code>{
+  "items": [
+    {
+      "id": 1,
+      "name": "我的主机",
+      "note": "自用装机",
+      "item_count": 3,
+      "priced_count": 3,        // 有报价的件数
+      "missing_count": 0,       // 缺价件数 —— 不为 0 时总价是不完整的
+      "total": 9183.5,          // 总价（null 表示一件都没价）
+      "total_complete": true,   // 总价是否完整
+      "items": [
+        {
+          "item_id": 3,
+          "product_id": 5,
+          "model": "RTX 5060 Ti 16G",
+          "category": "gpu",
+          "quantity": 1,
+          "platforms": {                     // 三平台各自的最新价
+            "jd":     { "price": 6149, "low": 6149, "date": "2026-10-03", "kind": "new" },
+            "pdd":    { "price": 5603, "low": 5603, "date": "2026-09-23", "kind": "new" },
+            "xianyu": { "price": 3985, "low": 2300, "date": "2026-10-03", "kind": "used" }
+          },
+          "best":                            // 最便宜的那个平台
+            { "code": "xianyu", "name": "闲鱼", "price": 3985, "low": 2300,
+              "date": "2026-10-03", "kind": "used" },
+          "line_total": 3985
+        }
+      ]
+    }
+  ]
+}</code></pre>
+
+<h3>三个字段必须理解，否则会显示错价格</h3>
+<table>
+  <tr><th>字段</th><th>含义</th><th>怎么用</th></tr>
+  <tr>
+    <td><code>price</code></td>
+    <td><b>稳健价</b>（当天报价的 25 分位）</td>
+    <td><b>算总价、显示"大概多少钱"用它</b></td>
+  </tr>
+  <tr>
+    <td><code>low</code></td>
+    <td>当天<b>真实最低挂牌价</b></td>
+    <td>想提示"还有人挂得更低"时用它，但<b>不要计入总价</b></td>
+  </tr>
+  <tr>
+    <td><code>date</code></td>
+    <td>这个价是哪天的</td>
+    <td>务必显示出来（京东每轮只采 2 个型号，进度可能落后好几天）</td>
+  </tr>
+</table>
+<p>
+  为什么不能用 <code>low</code> 算总价：实测 <b>RTX 5060 Ti 16G</b> 在闲鱼的最低价是 ¥2300，
+  而当天真实行情约 ¥4400 —— 那条标题是「技嘉 <b>RX6800</b> 超级雕…<b>换了 5060Ti 故出</b>」，
+  卖的其实是 RX 6800，只因句子里提到"5060Ti"就被归到了这个型号名下。
+  用最低价算总价，整套配置会凭空便宜两千块。
+</p>
+
+<h2>四、小程序端怎么调</h2>
+
+<h3>1）封装一个请求方法（<code>utils/api.js</code>）</h3>
+<pre><code>const BASE = 'http://192.168.1.18:8848';   // ← 换成你电脑当前的局域网 IP
+
+function req(path, method, data) {
+  return new Promise((resolve, reject) =&gt; {
+    wx.request({
+      url: BASE + path,
+      method: method || 'GET',            // ⚠️ 没有 PATCH，改数据用 POST
+      data: data || undefined,
+      header: { 'Content-Type': 'application/json' },
+      success: (res) =&gt; {
+        if (res.statusCode &gt;= 200 &amp;&amp; res.statusCode &lt; 300) resolve(res.data);
+        else reject(new Error((res.data &amp;&amp; res.data.detail) || ('HTTP ' + res.statusCode)));
+      },
+      fail: reject,
+    });
+  });
+}
+
+module.exports = {
+  listBuilds:   ()            =&gt; req('/api/builds'),
+  createBuild:  (name)        =&gt; req('/api/builds', 'POST', { name: name }),
+  renameBuild:  (id, name)    =&gt; req('/api/builds/' + id, 'POST', { name: name }),
+  deleteBuild:  (id)          =&gt; req('/api/builds/' + id, 'DELETE'),
+  addItem:      (id, pid)     =&gt; req('/api/builds/' + id + '/items', 'POST', { product_id: pid }),
+  setQuantity:  (itemId, q)   =&gt; req('/api/build-items/' + itemId, 'POST', { quantity: q }),
+  removeItem:   (itemId)      =&gt; req('/api/build-items/' + itemId, 'DELETE'),
+  searchModels: (kw)          =&gt; req('/api/products?limit=20&amp;q=' + encodeURIComponent(kw)),
+};</code></pre>
+
+<h3>2）页面里用（示例）</h3>
+<pre><code>const api = require('../../utils/api.js');
+
+Page({
+  data: { builds: [], keyword: '', hits: [] },
+
+  onShow() { this.loadBuilds(); },
+
+  loadBuilds() {
+    api.listBuilds()
+      .then((d) =&gt; this.setData({ builds: d.items }))
+      .catch((e) =&gt; wx.showToast({ title: '加载失败', icon: 'none' }));
+  },
+
+  onSearch(e) {
+    const kw = e.detail.value.trim();
+    if (!kw) return this.setData({ hits: [] });
+    api.searchModels(kw).then((d) =&gt; this.setData({ hits: d.items }));
+  },
+
+  onAdd(e) {
+    const { buildId, productId } = e.currentTarget.dataset;
+    api.addItem(buildId, productId)
+      .then((updated) =&gt; {
+        // 接口直接返回更新后的这一套配置，可以原地替换
+        const builds = this.data.builds.map((b) =&gt; (b.id === updated.id ? updated : b));
+        this.setData({ builds: builds, hits: [] });
+      });
+  },
+});</code></pre>
+
+<h3>3）WXML 骨架</h3>
+<pre><code>&lt;view wx:for="{{builds}}" wx:key="id" class="card"&gt;
+  &lt;view class="head"&gt;
+    &lt;text class="name"&gt;{{item.name}}&lt;/text&gt;
+    &lt;text class="total"&gt;¥{{item.total}}&lt;/text&gt;
+    &lt;text class="meta"&gt;{{item.item_count}} 件
+      &lt;block wx:if="{{item.missing_count &gt; 0}}"&gt;（{{item.missing_count}} 件缺价）&lt;/block&gt;
+    &lt;/text&gt;
+  &lt;/view&gt;
+
+  &lt;view wx:for="{{item.items}}" wx:for-item="it" wx:key="item_id" class="row"&gt;
+    &lt;text&gt;{{it.model}}&lt;/text&gt;
+    &lt;text class="price"&gt;¥{{it.best.price}}&lt;/text&gt;
+    &lt;text class="from"&gt;{{it.best.name}} · {{it.best.date}}&lt;/text&gt;
+  &lt;/view&gt;
+&lt;/view&gt;</code></pre>
+
+<h2>五、注意事项</h2>
+<ul>
+  <li><b>手机和电脑必须在同一个 WiFi。</b>这是零成本方案的前提。</li>
+  <li><b>电脑不能休眠。</b>合盖或睡眠后服务就断了（这也是现在只做自用的原因之一）。</li>
+  <li><b>开发者工具报「不在以下 request 合法域名列表中」</b>时：右上角「详情」→「本地设置」→
+      勾选「不校验合法域名、web-view（业务域名）、TLS 版本以及 HTTPS 证书」。
+      真机调试同样需要打开调试模式。</li>
+  <li><b>出门在外用不了。</b>不同网络下必须走公网 HTTPS + 已备案域名（微信硬性要求，域名还必须 ICP 备案）。
+      真要做到那一步，优先考虑把服务放到<b>微信云托管</b>（平台给 HTTPS 域名，不用自己备案），
+      而不是自己去买域名走备案流程。</li>
+  <li>接口<b>没有任何鉴权</b> —— 所以只在受信任的家庭/办公局域网里开，
+      不要把电脑的 8848 端口直接映射到公网。</li>
+</ul>
+
+<footer>
+  数据来源：本机 <code>DIY价格汇报</code> 服务（launchd 常驻，每小时采集一轮）。<br>
+  本文档里的接口与字段均按 2026-10-04 实际返回核对过。
+</footer>
+
+</div>
+</body>
+</html>

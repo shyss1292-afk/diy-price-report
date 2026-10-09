@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..config import APP_VERSION
 from ..db import get_db
-from ..models import CrawlLog, Listing, Platform, PriceDaily, Product
+from ..models import Build, BuildItem, CrawlLog, Listing, Platform, PriceDaily, Product
 from ..seed_bench import bench_score
 from ..seed_data import (
     subcategories_of,
@@ -20,6 +20,7 @@ from ..seed_data import (
     category_group,
     category_label,
 )
+from ..services import builds as builds_svc
 from ..services import coverage as coverage_svc
 from ..services import report as report_svc
 from ..services import trend as trend_svc
@@ -665,3 +666,110 @@ def listing_history_of(
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok", "version": APP_VERSION}
+
+
+# ---------------------------------------------------------------- 装机配置单
+#
+# 自用装机助手：存几套配置，看每套的三平台实时总价。
+#
+# ⚠️ 注意路径不要用 `/builds/{build_id}/items/{item_id}` 这种嵌套 ——
+# `/builds/items/5` 会被 `/builds/{build_id}` 抢先匹配（build_id="items" → 422）。
+# 单独用 `/build-items/{item_id}` 前缀，无歧义。
+
+
+@router.get("/builds")
+def list_builds(db: Session = Depends(get_db)) -> dict:
+    """所有配置单，含实时三平台价与总价。"""
+    return {"items": builds_svc.list_builds(db)}
+
+
+@router.post("/builds")
+def create_build(payload: dict | None = None, db: Session = Depends(get_db)) -> dict:
+    data = payload or {}
+    try:
+        build = builds_svc.create_build(db, data.get("name", ""), data.get("note", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    return builds_svc.serialize(db, build)
+
+
+# ⚠️ 每个"改"接口都同时挂 PATCH 和 POST 两个装饰器。
+#
+# 原因：**小程序的 `wx.request` 不支持 PATCH** —— 官方文档里 method 的合法值是
+# `OPTIONS / GET / HEAD / POST / PUT / DELETE / TRACE / CONNECT`，没有 PATCH。
+# 网页端（H5）习惯用 PATCH，小程序端只能用 POST，所以两个都留着：
+# 页面走语义正确的 PATCH，小程序走 POST，同一份实现。
+@router.patch("/builds/{build_id}")
+@router.post("/builds/{build_id}")
+def update_build(build_id: int, payload: dict, db: Session = Depends(get_db)) -> dict:
+    build = db.get(Build, build_id)
+    if build is None:
+        raise HTTPException(status_code=404, detail="配置单不存在")
+    if "name" in payload:
+        name = (payload.get("name") or "").strip()[:64]
+        if name:
+            build.name = name
+    if "note" in payload:
+        build.note = (payload.get("note") or "").strip()[:200]
+    db.commit()
+    return builds_svc.serialize(db, build)
+
+
+@router.delete("/builds/{build_id}")
+def delete_build(build_id: int, db: Session = Depends(get_db)) -> dict:
+    build = db.get(Build, build_id)
+    if build is None:
+        raise HTTPException(status_code=404, detail="配置单不存在")
+    db.delete(build)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/builds/{build_id}/items")
+def add_build_item(
+    build_id: int, payload: dict, db: Session = Depends(get_db)
+) -> dict:
+    build = db.get(Build, build_id)
+    if build is None:
+        raise HTTPException(status_code=404, detail="配置单不存在")
+    try:
+        builds_svc.add_item(
+            db,
+            build,
+            int(payload.get("product_id") or 0),
+            int(payload.get("quantity") or 1),
+            payload.get("note", "") or "",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    return builds_svc.serialize(db, build)
+
+
+@router.patch("/build-items/{item_id}")
+@router.post("/build-items/{item_id}")  # 小程序用（wx.request 不支持 PATCH）
+def update_build_item(item_id: int, payload: dict, db: Session = Depends(get_db)) -> dict:
+    item = db.get(BuildItem, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="配件不存在")
+    if "quantity" in payload:
+        item.quantity = max(1, min(99, int(payload.get("quantity") or 1)))
+    if "note" in payload:
+        item.note = (payload.get("note") or "").strip()[:120]
+    build = item.build
+    db.commit()
+    return builds_svc.serialize(db, build)
+
+
+@router.delete("/build-items/{item_id}")
+def delete_build_item(item_id: int, db: Session = Depends(get_db)) -> dict:
+    item = db.get(BuildItem, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="配件不存在")
+    build = item.build
+    db.delete(item)
+    db.flush()
+    db.refresh(build)
+    db.commit()
+    return builds_svc.serialize(db, build)

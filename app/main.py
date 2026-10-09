@@ -31,6 +31,9 @@ PAGES: dict[str, str] = {
     "/product": "product.html",
     "/compare": "compare.html",
     "/admin": "admin.html",
+    # 装机助手（手机优先）—— 用 /build 而不是 /builds，页面名与 API 前缀分开，
+    # 免得以后加二级路由时和 /api/builds 混淆。
+    "/build": "build.html",
 }
 
 

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2563eb">
+<!-- 加到手机主屏后以独立窗口打开，像个小 App -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="装机助手">
+<title>装机助手 · DIY 价格</title>
+<link rel="icon" href="/static/favicon.svg">
+<style>
+/* 页面自带样式，**不引 app.css** —— 那是给桌面看板用的（含侧边栏等全局布局），
+   引进来会在手机上打架。配色值抄自 app.css 的 :root，保持一致。 */
+:root {
+  --bg: #f4f7fc;
+  --panel: #ffffff;
+  --panel-2: #f7f9fd;
+  --border: #e6ecf6;
+  --border-strong: #d3dded;
+  --text: #0f1b2d;
+  --text-2: #56658a;
+  --text-3: #93a1bb;
+  --up: #e0393e;
+  --up-soft: #fdeced;
+  --down: #0d9e6a;
+  --down-soft: #e8f7f1;
+  --accent: #2563eb;
+  --accent-soft: #eaf1fe;
+  --radius: 12px;
+  --shadow: 0 1px 2px rgba(16,32,64,.04), 0 2px 8px rgba(16,32,64,.045);
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  padding-bottom: calc(84px + env(safe-area-inset-bottom));
+}
+.bk-top {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 12px 16px;
+  padding-top: calc(12px + env(safe-area-inset-top));
+  background: rgba(255,255,255,.92);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.bk-top h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: .2px; }
+.bk-top .bk-sub { font-size: 12px; color: var(--text-3); font-weight: 400; margin-left: 8px; }
+.bk-btn {
+  border: 1px solid var(--border-strong); background: #fff; color: var(--text-2);
+  border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer;
+}
+.bk-btn:active { background: var(--panel-2); }
+.bk-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* max-width 是为了**宽屏下不至于拉成一条**：这个页面是手机优先，
+   但在电脑上（或在 WorkBuddy 预览面板里）打开时，通栏卡片会难看得没法看。 */
+.bk-list { padding: 14px 14px 0; display: flex; flex-direction: column; gap: 14px;
+  max-width: 560px; margin: 0 auto; width: 100%; }
+
+/* ---- 配置单卡片 ---- */
+.bk-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+}
+.bk-card-head {
+  padding: 14px 16px; display: flex; align-items: flex-start; gap: 12px;
+  cursor: pointer; user-select: none;
+}
+.bk-card-head:active { background: var(--panel-2); }
+.bk-name { font-size: 16px; font-weight: 600; flex: 1; min-width: 0; }
+.bk-name small { display: block; font-size: 12px; font-weight: 400; color: var(--text-3); margin-top: 3px; }
+.bk-total { text-align: right; white-space: nowrap; }
+.bk-total b { font-size: 19px; font-weight: 650; letter-spacing: -.3px; }
+.bk-total span { display: block; font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.bk-warn { color: #b45309; }
+.bk-caret { color: var(--text-3); font-size: 12px; transition: transform .18s; padding-top: 4px; }
+.bk-card.open .bk-caret { transform: rotate(90deg); }
+
+/* ---- 明细 ---- */
+.bk-items { display: none; border-top: 1px solid var(--border); }
+.bk-card.open .bk-items { display: block; }
+.bk-item { padding: 12px 16px; border-bottom: 1px solid var(--panel-2); }
+.bk-item:last-child { border-bottom: 0; }
+.bk-item-top { display: flex; align-items: baseline; gap: 8px; }
+.bk-cat {
+  font-size: 11px; color: var(--accent); background: var(--accent-soft);
+  border-radius: 5px; padding: 1px 6px; flex: 0 0 auto;
+}
+.bk-model { font-size: 14px; font-weight: 550; flex: 1; min-width: 0; }
+.bk-best { font-size: 16px; font-weight: 650; white-space: nowrap; }
+.bk-best.miss { color: var(--text-3); font-weight: 400; font-size: 13px; }
+.bk-plats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.bk-plat {
+  font-size: 12px; color: var(--text-2); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px;
+}
+.bk-plat b { font-weight: 600; color: var(--text); }
+.bk-plat.cheap { background: var(--down-soft); border-color: #bfe8d8; color: var(--down); }
+.bk-plat.cheap b { color: var(--down); }
+.bk-plat.none { color: var(--text-3); }
+.bk-item-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.bk-item-foot .spacer { flex: 1; }
+.bk-qty { display: flex; align-items: center; border: 1px solid var(--border-strong); border-radius: 7px; overflow: hidden; }
+.bk-qty button {
+  border: 0; background: #fff; width: 30px; height: 28px; font-size: 16px;
+  color: var(--text-2); cursor: pointer;
+}
+.bk-qty button:active { background: var(--panel-3, #eef3fb); }
+.bk-qty span { min-width: 26px; text-align: center; font-size: 13px; }
+.bk-del { border: 0; background: none; color: var(--text-3); font-size: 13px; cursor: pointer; padding: 4px 2px; }
+.bk-del:active { color: var(--up); }
+.bk-note { font-size: 12px; color: var(--text-3); margin-top: 6px; }
+.bk-empty { padding: 20px 16px; color: var(--text-3); font-size: 13px; text-align: center; }
+.bk-addrow { padding: 10px 16px 14px; }
+.bk-addrow .bk-btn { width: 100%; }
+
+/* ---- 底部操作条 ---- */
+.bk-foot {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  width: 100%; max-width: 560px; bottom: 0; z-index: 30;
+  padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+  background: rgba(255,255,255,.94);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-top: 1px solid var(--border);
+  display: flex; gap: 10px;
+}
+.bk-foot .bk-btn { flex: 1; padding: 12px; font-size: 15px; border-radius: 10px; }
+
+/* ---- 弹层（搜索型号 / 输入名称）---- */
+.bk-mask {
+  position: fixed; inset: 0; z-index: 50; background: rgba(15,27,45,.42);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.bk-sheet {
+  background: #fff; width: 100%; max-width: 560px;
+  border-radius: 16px 16px 0 0; max-height: 84vh; display: flex; flex-direction: column;
+}
+.bk-sheet h2 { margin: 0; padding: 16px 16px 10px; font-size: 15px; font-weight: 600; }
+.bk-sheet .bk-body { overflow: auto; padding: 0 16px 16px; }
+.bk-input {
+  width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid var(--border-strong);
+  border-radius: 10px; outline: none; background: var(--panel-2); color: var(--text);
+}
+.bk-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
+.bk-hits { margin-top: 10px; }
+.bk-hit {
+  display: flex; align-items: center; gap: 10px; padding: 11px 4px;
+  border-bottom: 1px solid var(--panel-2); cursor: pointer;
+}
+.bk-hit:active { background: var(--panel-2); }
+.bk-hit .m { flex: 1; min-width: 0; font-size: 14px; }
+.bk-hit .m small { display: block; color: var(--text-3); font-size: 12px; margin-top: 2px; }
+.bk-hit .p { font-size: 14px; font-weight: 600; white-space: nowrap; }
+.bk-hit .p.miss { color: var(--text-3); font-weight: 400; font-size: 12px; }
+.bk-sheet-foot { padding: 10px 16px calc(14px + env(safe-area-inset-bottom)); display: flex; gap: 10px; }
+.bk-sheet-foot .bk-btn { flex: 1; padding: 11px; border-radius: 10px; }
+
+.bk-toast {
+  position: fixed; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom));
+  transform: translateX(-50%); z-index: 60;
+  background: rgba(15,27,45,.92); color: #fff; font-size: 13px;
+  padding: 9px 16px; border-radius: 999px; max-width: 86vw; text-align: center;
+}
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<header class="bk-top">
+  <h1>装机助手<span class="bk-sub" id="fresh"></span></h1>
+  <button class="bk-btn" id="refresh">刷新</button>
+</header>
+
+<main class="bk-list" id="list"></main>
+
+<div class="bk-foot">
+  <button class="bk-btn primary" id="new-build">＋ 新建配置单</button>
+</div>
+
+<div id="sheet-host"></div>
+<div class="bk-toast" id="toast" hidden></div>
+
+<script src="/static/js/build.js" defer></script>
+</body>
+</html>

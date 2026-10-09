@@ -288,6 +288,16 @@ def build_daily_report(
     # 那些历史行虽然平台名相同，价格却是程序生成的。若不按血缘过滤，表格里
     # 就会出现"京东 ¥17998"这种看着像真、其实是编的价格。默认只取真实采集。
     def _lineage(stmt):
+        """只取**真实采集、且非嫌疑**的报价。
+
+        与 `is_synthetic` 合并进同一个 helper，是因为两者回答的是同一个问题
+        「这条报价能不能代表该型号行情」，分开写必然漏。实测（2026-10-03）
+        `hist_low`（史低价）就漏了：它单独写了一行 `is_synthetic.is_(False)`，
+        于是**涡轮卡 / 工包卡 / 低价引流**照样能做"历史最低价"。现在它也走这里。
+
+        嫌疑标记见 `collectors/quality.py`：bundle / defective / industrial。
+        """
+        stmt = stmt.where(Listing.quality_flags == "")
         return stmt.where(Listing.is_synthetic.is_(False)) if real_only else stmt
 
     batches = [
@@ -405,14 +415,13 @@ def build_daily_report(
     hist_low = {
         pid: lo
         for pid, lo in session.execute(
-            select(Listing.product_id, func.min(Listing.price))
-            .where(
-                Listing.trade_date >= latest_date - timedelta(days=days),
-                Listing.product_id.in_(pids),
-                Listing.platform_id.in_(plat_ids),
-                Listing.is_synthetic.is_(False),
-            )
-            .group_by(Listing.product_id)
+            _lineage(
+                select(Listing.product_id, func.min(Listing.price)).where(
+                    Listing.trade_date >= latest_date - timedelta(days=days),
+                    Listing.product_id.in_(pids),
+                    Listing.platform_id.in_(plat_ids),
+                )
+            ).group_by(Listing.product_id)
         ).all()
     }
 

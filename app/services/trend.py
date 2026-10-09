@@ -8,17 +8,115 @@
 """
 from __future__ import annotations
 
-import math
 import statistics
 import threading
 from datetime import date, timedelta
+from typing import NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import Listing, Platform, PriceDaily, Product
+from .aggregate import P25_MIN_SAMPLES
 
 SERIES_KEYS = ("new_low", "used_low", "all_low", "new_avg", "all_avg", "all_high")
+
+# 稳健序列（25 分位）—— **只供指标计算，不对外暴露**。
+# 与 SERIES_KEYS 分开命名，是为了让"界面上显示的最低价"和"算涨跌幅用的底价"
+# 一眼能区分开：前者是真实挂牌的最低价（可以真的买到），后者是去掉最便宜那
+# 一小撮之后的稳健价（不会被一条引流价带跑）。
+ROBUST_KEYS = ("new_low_robust", "used_low_robust", "all_low_robust")
+
+_BASIS_ROBUST = {"new": "new_low_robust", "used": "used_low_robust", "all": "all_low_robust"}
+
+# ---- 可比性闸门参数（**只有这一份定义**，见 _comparable）----
+#
+# MIN_SAMPLES 与聚合层的 `P25_MIN_SAMPLES` **必须是同一个数**，理由见那边注释：
+# 样本不足 `P25_MIN_SAMPLES` 时稳健价退回 min，如果一个序列里既有"退回的 min"
+# 又有"真 p25"，两者不在一个尺度上，相减会造出假涨跌。
+# 直接从聚合层 import，避免任何一方被单独改动。
+MIN_SAMPLES = P25_MIN_SAMPLES  # 两天各自的样本量下限
+MAX_SAMPLE_RATIO = 4   # 两天样本量之比上限（17 条的最低价比 3 条的更容易低）
+MIN_JACCARD = 0.5      # 两天平台集合的 Jaccard 重合度下限
+
+
+class _Entry(NamedTuple):
+    """某个 (型号, 平台, 交易日) 的一行聚合。
+
+    用 NamedTuple 而不是裸元组：这里字段从 6 个涨到 7 个（加了 `p25`），
+    裸元组靠下标取值时**插入一个字段就会静默错位**（`max` 变 `avg` 这种），
+    且不会有任何报错。命名后按属性取，改字段顺序也不会错。
+    """
+
+    platform_id: int
+    kind: str
+    low: float
+    p25: float
+    high: float
+    avg: float
+    count: int
+
+
+def _robust_low(vals: list[_Entry]) -> float | None:
+    """样本量足够的平台里，各平台 p25 的最小值。
+
+    **为什么必须卡样本量**：`aggregate._p25` 在样本 < `P25_MIN_SAMPLES` 时
+    退回 min（3 条算分位没意义）。那些"退回值"不是稳健价，拿它们参与
+    "跨平台取最小"就等于把**单条样本**请了回来 ——
+
+      实测 RTX 5060 Ti 16G：京东当天只有 1 条 ¥3349（退回 min），
+      闲鱼 19 条的真 p25 是 ¥4425。跨平台 min 被那条单样本拉到 3349，
+      而前一天稳健值是 ¥4400 → 算出 **-23.9%**；
+      可同一张卡片上"现价"显示的是真实最低价 ¥3300 vs ¥2959（**在涨**）
+      —— 现价在涨、涨跌幅在跌，用户看到的就是"根本对不上"。
+
+    所以：稳健价只在**样本够**的平台之间比较；一个都没有就如实返回 None
+    （该天不参与涨跌计算）。
+    """
+    strong = [e for e in vals if e.count >= MIN_SAMPLES]
+    return min(e.p25 for e in strong) if strong else None
+
+
+def _comparable(series: dict, idx: int | None, prev_idx: int | None) -> bool:
+    """两个下标对应的交易日是否**口径可比**。
+
+    判据用**平台集合的 Jaccard 重合度**，不是"平台数量"：
+      · 两天都只有闲鱼 → 重合度 1.0 → **可比**（同为二手口径）
+        （早先试过"平台数必须 ≥2"，结果 123 个型号只剩 2 个有涨跌幅 ——
+          真实数据里大部分型号每天就只有闲鱼一个平台）
+      · 昨天 {jd,pdd,xianyu}、今天 {pdd} → 重合度 0.33 → 不可比
+    再加**样本量**两道：各 ≥3 条（单条样本的"最低价"就是那条本身，
+    与几十条里的最低价不可比）；且量级相当（≤4 倍，样本越多越容易捞到极端低价）。
+
+    这套判据原先只长在 `build_snapshot`（首页涨跌榜）里，而**详情页的
+    d1/d7/d30 完全没有闸门** —— 所以同一个型号在首页显示"—"、点进详情页
+    却显示"一天涨 44%"，用户看到的就是后者。抽成函数后两处共用。
+    """
+    if idx is None or prev_idx is None:
+        return False
+    # ⚠️ 比的是**有效平台集合**（样本量够算 p25 的那些），不是"所有平台"。
+    #
+    # 踩过的坑（Core Ultra 7 265K，2026-10-03）：
+    #   10-02 只有闲鱼（18 条，p25 ¥1435）→ 10-03 变成京东 5 条 + 闲鱼 3 条，
+    #   闲鱼那 3 条不够算 p25，于是稳健值只剩京东的 ¥1899（全新）。
+    #   若按"所有平台"算，10-03 {jd,xianyu} vs 10-02 {xianyu} 的 Jaccard 恰好
+    #   是 0.5（放行了），可**两边真正参与比较的平台根本没重合** ——
+    #   本质是"拿京东全新价 vs 闲鱼二手价"，算出假 +32.33%。
+    #   按有效平台算：{jd} vs {xianyu} 交集为空 → 不可比 → 显示 —。
+    sets = series.get("robust_platform_ids") or series.get("platform_ids") or []
+    counts = series.get("sample_counts") or []
+    if idx >= len(sets) or prev_idx >= len(sets):
+        return False
+    a, b = sets[idx], sets[prev_idx]
+    union = a | b
+    if not union or len(a & b) / len(union) < MIN_JACCARD:
+        return False
+    if idx >= len(counts) or prev_idx >= len(counts):
+        return False
+    a_n, b_n = counts[idx], counts[prev_idx]
+    if a_n < MIN_SAMPLES or b_n < MIN_SAMPLES:
+        return False
+    return max(a_n, b_n) <= min(a_n, b_n) * MAX_SAMPLE_RATIO
 
 
 # ---------------------------------------------------------------- 市场序列缓存
@@ -209,6 +307,7 @@ def _compute_market_series(
             PriceDaily.platform_id,
             Platform.kind,
             PriceDaily.min_price,
+            PriceDaily.p25_price,
             PriceDaily.max_price,
             PriceDaily.avg_price,
             PriceDaily.sample_count,
@@ -231,46 +330,64 @@ def _compute_market_series(
             Product.category == category
         )
 
-    # entries 的每项：(platform_id, kind, min_price, max_price, avg_price)
-    raw: dict[int, dict[date, list[tuple[int, str, float, float, float]]]] = {}
-    for pid, d, plid, kind, lo, hi, avg, cnt in session.execute(stmt).all():
+    raw: dict[int, dict[date, list[_Entry]]] = {}
+    for pid, d, plid, kind, lo, p25, hi, avg, cnt in session.execute(stmt).all():
+        low = float(lo)
+        # `p25_price` 是后加的列：迁移刚补上、聚合还没重算时它是 0。
+        # 0 会让"稳健底价"变成 ¥0（比坏数据更糟），所以**只认正数**，
+        # 否则如实退回 min —— 老数据最多是"没有变稳"，不会凭空多出 0 元报价。
+        robust = float(p25) if p25 and float(p25) > 0 else low
         raw.setdefault(pid, {}).setdefault(d, []).append(
-            (int(plid), kind, float(lo), float(hi), float(avg), int(cnt))
+            _Entry(int(plid), kind, low, robust, float(hi), float(avg), int(cnt))
         )
 
     frame: dict[int, dict] = {}
     for pid, by_date in raw.items():
         dates = sorted(by_date)
         series: dict = {"dates": dates}
-        for key in SERIES_KEYS:
+        for key in SERIES_KEYS + ROBUST_KEYS:
             series[key] = []
         # 每天**有哪些平台**在报价（与 SERIES_KEYS 对齐的独立字段，不是价格序列）。
         # 存集合而不是数量 —— 判"可不可比"要看**集合是否重合**：
         # 「两天都只有闲鱼」可比（同为二手口径），
         # 「昨天三平台、今天只有拼多多」不可比（口径整个换了）。
         series["platform_ids"] = []
+        # **有效平台** = 当天样本量够算 p25 的平台。闸门比的是这个，不是"所有平台"。
+        # 理由见 `_comparable`。
+        series["robust_platform_ids"] = []
         series["sample_counts"] = []
 
         for d in dates:
             entries = by_date[d]
-            new_vals = [e for e in entries if e[1] == "new"]
-            used_vals = [e for e in entries if e[1] == "used"]
+            new_vals = [e for e in entries if e.kind == "new"]
+            used_vals = [e for e in entries if e.kind == "used"]
 
-            series["new_low"].append(min(e[2] for e in new_vals) if new_vals else None)
-            series["used_low"].append(min(e[2] for e in used_vals) if used_vals else None)
-            series["all_low"].append(min(e[2] for e in entries) if entries else None)
-            series["all_high"].append(max(e[3] for e in entries) if entries else None)
+            series["new_low"].append(min(e.low for e in new_vals) if new_vals else None)
+            series["used_low"].append(min(e.low for e in used_vals) if used_vals else None)
+            series["all_low"].append(min(e.low for e in entries) if entries else None)
+            series["all_high"].append(max(e.high for e in entries) if entries else None)
             series["new_avg"].append(
-                sum(e[4] for e in new_vals) / len(new_vals) if new_vals else None
+                sum(e.avg for e in new_vals) / len(new_vals) if new_vals else None
             )
             series["all_avg"].append(
-                sum(e[4] for e in entries) / len(entries) if entries else None
+                sum(e.avg for e in entries) / len(entries) if entries else None
             )
-            series["platform_ids"].append(frozenset(e[0] for e in entries))
+            # ---- 稳健底价（25 分位）----
+            # 语义："在**每个平台内部**先排除最便宜的那一小撮，再跨平台比最低"。
+            # 直接对全体报价取分位是错的 —— 那会把"闲鱼二手"和"京东全新"
+            # 混成一个样本池，分位点落在两个价带之间，两头都不代表。
+            # 样本量的门槛见 `_robust_low`。
+            series["new_low_robust"].append(_robust_low(new_vals))
+            series["used_low_robust"].append(_robust_low(used_vals))
+            series["all_low_robust"].append(_robust_low(entries))
+            series["platform_ids"].append(frozenset(e.platform_id for e in entries))
+            series["robust_platform_ids"].append(
+                frozenset(e.platform_id for e in entries if e.count >= MIN_SAMPLES)
+            )
             # 当天该型号的**总样本条数** —— 最低价的稳定性取决于它。
             # 单条样本的"最低价"就是那条本身，跟多天几十条里的最低价
             # 不是一回事（实测 990 EVO 1TB：1 条 ¥350 vs 2 条 ¥835，算出 +139%）。
-            series["sample_counts"].append(sum(e[5] for e in entries))
+            series["sample_counts"].append(sum(e.count for e in entries))
 
         # 只回填**前导** None（首次有数据之前的那几个），让图表左端连续。
         #
@@ -281,7 +398,7 @@ def _compute_market_series(
         #    （原实现用 `if v is None` 无差别回填，正是这个毛病。）
         #    中间缺口保持 None，图表自己会断开 —— 断开的线是诚实的，
         #    连上去的假线不是。
-        for key in SERIES_KEYS:
+        for key in SERIES_KEYS + ROBUST_KEYS:
             seq = series[key]
             first = next((v for v in seq if v is not None), None)
             if first is None:
@@ -298,23 +415,47 @@ def _compute_market_series(
 # ---------------------------------------------------------------- 指标
 
 def compute_metrics(series: dict) -> dict:
-    """基于日线序列计算趋势指标。"""
+    """基于日线序列计算趋势指标。
+
+    ⚠️ **涨跌幅 / 分位 / 均线一律用稳健序列（25 分位），不用 min**
+    ---------------------------------------------------------
+    最低价是**单点**：当天最便宜的那一条说了算，于是"最便宜的那条换人了"
+    就被读成"涨价了"。实测两例（用户 2026-10-03 直接质疑的两个数）：
+      · RTX 4080 Super 16G：09-30 京东零售卡 ¥7039 → 10-02 京东 3 条
+        全是涡轮/工包卡（最低 ¥9800）→ d1 = **+39.2%**、d7 = **+44.1%**
+      · RX 7600 8G：闲鱼一条 ¥1050 的引流价 → 次日 ¥1420 → **+35.2%**
+    两者都是"最低价换人"，不是市场涨价。稳健序列 + `_comparable` 闸门后，
+    这两条都会落回真实波动（±2%）或直接置 None（显示 —）。
+
+    `history.min`（历史最低价）**仍用真实 min** —— 那是真实存在的挂牌价，
+    用户要看"最低多少钱买到过"；而且要看的正是"是不是真出现过这个价"。
+    """
     dates: list[date] = series["dates"]
     low: list[float | None] = series["all_low"]
     if not dates:
         return {}
 
+    # 稳健序列。老缓存 / 构造出来的 series 可能没有这个键，退回 min 序列。
+    robust: list[float | None] = series.get("all_low_robust") or low
+
     today = dates[-1]
     last = low[-1]
+    last_robust = robust[-1]
+    last_idx = len(dates) - 1
 
     changes: dict[str, dict | None] = {}
     for label, back in (("d1", 1), ("d7", 7), ("d30", 30)):
-        prev = _lookup(dates, low, today - timedelta(days=back))
-        pct = _pct(last, prev)
+        target = today - timedelta(days=back)
+        prev_idx = _lookup_idx(dates, target)
+        prev = _lookup(dates, robust, target)
+        pct = _pct(last_robust, prev)
+        # ---- 可比性闸门（原先只有首页涨跌榜有，详情页缺）----
+        if not _comparable(series, last_idx, prev_idx):
+            pct = None
         changes[label] = (
             None
             if pct is None
-            else {"abs": round(last - prev, 2), "pct": round(pct, 2)}
+            else {"abs": round((last_robust or 0) - (prev or 0), 2), "pct": round(pct, 2)}
         )
 
     clean_low = _clean(low)
@@ -323,7 +464,7 @@ def compute_metrics(series: dict) -> dict:
     min_date = dates[low.index(hist_min)] if hist_min is not None else None
     max_date = dates[low.index(hist_max)] if hist_max is not None else None
 
-    pct90 = _percentile(low, 90)
+    pct90 = _percentile(robust, 90)
     chg30 = changes["d30"]["pct"] if changes["d30"] else None
     chg7 = changes["d7"]["pct"] if changes["d7"] else None
 
@@ -334,9 +475,11 @@ def compute_metrics(series: dict) -> dict:
         "last_used_low": _r(series["used_low"][-1]),
         "last_avg": _r(series["all_avg"][-1]),
         "changes": changes,
-        "ma7": _r(_ma(low, 7)),
-        "ma30": _r(_ma(low, 30)),
-        "volatility_30d": _r(_volatility(low, 30), 3),
+        # 均线 / 波动率同用稳健序列 —— 它们在界面上是"判断价位"的依据，
+        # 被一条引流价拉低会给出"已到低位、可入手"的错误信号。
+        "ma7": _r(_ma(robust, 7)),
+        "ma30": _r(_ma(robust, 30)),
+        "volatility_30d": _r(_volatility(robust, 30), 3),
         "percentile_90d": _r(pct90, 1),
         "history": {
             "min": _r(hist_min),
@@ -555,6 +698,7 @@ def build_snapshot(
     from ..seed_data import category_label
 
     key = BASIS_KEYS.get(basis, "all_low")
+    robust_key = _BASIS_ROBUST.get(basis, "all_low_robust")
     frame = load_market_series(session, days=days, category=category)
     if not frame:
         return []
@@ -595,54 +739,28 @@ def build_snapshot(
 
         last_date = dates[idx]
         last = low[idx]
+        robust = series.get(robust_key) or low
         # 涨跌基准跟着**数据日期**走，不是跟着"今天"走 ——
         # 否则拿昨天的价跟"今天减 7 天"比，区间口径就错了。
-        prev = _lookup(dates, low, last_date - timedelta(days=period))
-        pct = _pct(last, prev)
+        target = last_date - timedelta(days=period)
+        prev_idx = _lookup_idx(dates, target)
+        # 显示用的"上一价"仍是**真实最低价**（和 latest 同一把尺子）；
+        # 涨跌幅改用稳健序列 —— 否则会出现"现价 ¥1420、上一价 ¥1050、
+        # 涨幅只有 1%"这种自相矛盾的展示（见 compute_metrics 的说明）。
+        prev = low[prev_idx] if prev_idx is not None else None
+        pct = _pct(
+            robust[idx], robust[prev_idx] if prev_idx is not None else None
+        )
 
-        # ---- 可比性闸门：平台口径不一致时**不出涨跌幅** ----
-        #
+        # ---- 可比性闸门（判据与常量见模块顶部的 `_comparable`）----
         # 「全市场最低价」是跨平台取 min，**样本一换结论就变**。实测 RTX 5090：
         #   9/17 有 3 个平台（最低 ¥7898，闲鱼二手）→ 9/22 只剩 1 个
         #   （¥47777，拼多多全新）→ 直接取差值 = **+505%**，
         #   而真实市场并没有涨 5 倍 —— 那是**口径换了**，不是涨价。
-        #
-        # 判据用**平台集合的 Jaccard 重合度**，不是"平台数量"：
-        #   · 两天都只有闲鱼 → 重合度 1.0 → **可比**（同为二手口径）
-        #     （早先试过"平台数必须 ≥2"，结果 123 个型号只剩 2 个有涨跌幅 ——
-        #       真实数据里大部分型号每天就只有闲鱼一个平台）
-        #   · 昨天 {jd,pdd,xianyu}、今天 {pdd} → 重合度 0.33 → 不可比
         # 不够就置空（界面显示 —）。**宁可缺，不可错**：
         # 一个 +505% 的假信号比一个空格有害得多。
-        sets = series.get("platform_ids") or []
-        counts_s = series.get("sample_counts") or []
         prev_idx = _lookup_idx(dates, last_date - timedelta(days=period))
-        comparable = False
-        if sets and idx < len(sets) and prev_idx is not None and prev_idx < len(sets):
-            a, b = sets[idx], sets[prev_idx]
-            union = a | b
-            # 平台口径重合（Jaccard ≥ 0.5）
-            same_channels = bool(union) and len(a & b) / len(union) >= 0.5
-            # 且两天的**样本量都够**（各 ≥3 条）。
-            # 单条样本的"最低价"就是那条本身，与几十条里的最低价不可比 ——
-            # 实测 i3-12100F：9/22 有 26 条（最低 ¥352）→ 9/23 只有 1 条 ¥975，
-            # 平台集合是 {jd,xianyu} vs {jd}（Jaccard 0.5，放行了），
-            # 但样本量 26→1，算出 +177% 的假暴涨。
-            MIN_SAMPLES = 3
-            enough = (
-                idx < len(counts_s) and counts_s[idx] >= MIN_SAMPLES
-                and prev_idx < len(counts_s) and counts_s[prev_idx] >= MIN_SAMPLES
-            )
-            # 样本量还要**量级相当**：17 条里的最低价和 3 条里的最低价不是一回事
-            # —— 样本越多越容易捞到极端低价，min 自然更低。
-            # 实测 990 PRO 2TB：同为闲鱼，9/16 有 17 条（最低 ¥450），
-            # 9/21 只有 3 条（¥1029）→ 算出 +129%，但市场并没有涨一倍。
-            # 放宽到 4 倍，只挡量级差（正常日间波动一般在 2 倍以内）。
-            balanced = True
-            if enough:
-                a_n, b_n = counts_s[idx], counts_s[prev_idx]
-                balanced = max(a_n, b_n) <= min(a_n, b_n) * 4
-            comparable = same_channels and enough and balanced
+        comparable = _comparable(series, idx, prev_idx)
         if not comparable:
             pct = None
 
@@ -663,9 +781,16 @@ def build_snapshot(
                 "prev": _r(prev),
                 # abs 与 change_pct 同生共死 —— 涨跌幅不可比时，绝对差值同样不可比，
                 # 不能只藏一个留一个（否则界面上会出现"有价差但没百分比"的怪状态）
+                # abs 必须与 change_pct 同源（都用稳健序列），否则会出现
+                # "涨跌额 ¥370 但百分比 1%" 这种凑不出来的组合。
                 "abs": _r(
-                    (last - prev)
-                    if (comparable and last is not None and prev is not None)
+                    (robust[idx] - robust[prev_idx])
+                    if (
+                        comparable
+                        and prev_idx is not None
+                        and robust[idx] is not None
+                        and robust[prev_idx] is not None
+                    )
                     else None
                 ),
                 "change_pct": None if pct is None else _r(pct, 2),
