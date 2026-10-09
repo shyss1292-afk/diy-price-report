@@ -20,11 +20,15 @@
 import argparse
 import sqlite3
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/Users/apple/WorkBuddy/DIY价格汇报")
+# 项目根目录：从本文件位置推导，**不要硬编码作者本机路径** ——
+# 公开仓库里别人 clone 下来会直接 ImportError。
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
 from app.seed_data import CATEGORIES, CATEGORY_ORDER, category_group  # noqa: E402
 
-con = sqlite3.connect("/Users/apple/WorkBuddy/DIY价格汇报/data/diyprice.db")
+con = sqlite3.connect(str(_ROOT / "data" / "diyprice.db"))
 con.execute("PRAGMA busy_timeout=10000")
 TODAY = con.execute("SELECT date('now','localtime')").fetchone()[0]
 

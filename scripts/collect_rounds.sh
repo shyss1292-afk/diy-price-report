@@ -7,7 +7,10 @@ SOURCES="${2:-pdd,xianyu,jd}"
 GAP="${3:-20}"
 
 cd "$(dirname "$0")/.."
-PY=/Users/apple/.workbuddy/binaries/python/envs/diyprice/bin/python
+# Python 解释器：统一解析（环境变量 → 项目内 venv → 系统 python3）。
+# 原先硬编码作者本机路径，别人 clone 下来跑不了。
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/_python.sh"
+PY="$PYTHON_BIN"
 export DIYPRICE_FOCUS_CATEGORY="${DIYPRICE_FOCUS_CATEGORY:-gpu,cpu}"
 
 echo "=== 多轮采集：${ROUNDS} 轮 / 源=${SOURCES} / 间隔=${GAP}s / 品类=${DIYPRICE_FOCUS_CATEGORY} ==="

@@ -22,7 +22,17 @@ set -euo pipefail
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="配件价格追踪"
 APP_DIR="$HOME/Applications/$APP_NAME.app"
-ICON_PY=/Users/apple/.workbuddy-ai/binaries/python/envs/default/bin/python
+# 生成图标用的解释器（需要 Pillow）。
+# 原先硬编码作者本机路径 —— 别人 clone 下来这一步必然失败。
+# 可覆盖：DIYPRICE_ICON_PYTHON=/path/to/python bash scripts/make_desktop_app.sh
+ICON_PY="${DIYPRICE_ICON_PYTHON:-}"
+if [ -z "$ICON_PY" ] || [ ! -x "$ICON_PY" ]; then
+  ICON_PY=""
+  for _c in "$PROJ/.venv/bin/python" "$PROJ/venv/bin/python"; do
+    [ -x "$_c" ] && ICON_PY="$_c" && break
+  done
+fi
+[ -z "$ICON_PY" ] && ICON_PY="$(command -v python3 || echo python3)"
 SRC="$PROJ/scripts/webview_app.m"
 
 echo "==> 编译原生应用"

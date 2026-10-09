@@ -14,7 +14,7 @@ set -u
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-PYTHON_BIN="/Users/apple/.workbuddy/binaries/python/envs/diyprice/bin/python"
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/_python.sh"
 PORT=8848
 FIX=0
 [ "${1:-}" = "--fix" ] && FIX=1

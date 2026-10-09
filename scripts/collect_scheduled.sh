@@ -25,7 +25,8 @@ set -u
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-PYTHON_BIN="/Users/apple/.workbuddy/binaries/python/envs/diyprice/bin/python"
+# Python 解释器：统一解析（见 _python.sh）。
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/_python.sh"
 LOG="$PROJECT_DIR/data/collect.log"
 LOCK="$PROJECT_DIR/data/.collect.lock"
 

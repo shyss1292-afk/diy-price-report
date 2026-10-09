@@ -31,9 +31,11 @@
 """
 from __future__ import annotations
 
+import atexit
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,7 @@ PY = sys.executable
 
 BREAKER = PROJ / "app/services/breaker.py"
 PIPELINE = PROJ / "app/services/pipeline.py"
+QUALITY = PROJ / "app/collectors/quality.py"
 BASE = PROJ / "app/collectors/base.py"
 DB = PROJ / "app/db.py"
 PROBE = PROJ / "app/services/probe.py"
@@ -301,17 +304,24 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
         "            Platform.is_active.is_(True),\n",
         "",
     ),
+    # ---- 2026-10-03 重构后重写：闸门抽成了 `_comparable`，新变异逐条对应 ----
     (
-        "口径闸门退回「平台数 ≥2」（真实单平台型号全部失去涨跌幅）",
+        "口径闸门失效（Jaccard 判据退回恒真 → 跨口径比较重新出现）",
         TREND,
-        "comparable = same_channels and enough and balanced",
-        "comparable = (bool(sets) and idx < len(sets) and len(sets[idx]) >= 2)",
+        "    if not union or len(a & b) / len(union) < MIN_JACCARD:\n        return False",
+        "    if not union:\n        return False",
     ),
     (
         "样本量闸门退回无门槛（单条样本造出假暴涨）",
         TREND,
-        "            MIN_SAMPLES = 3",
-        "            MIN_SAMPLES = 1",
+        "    if a_n < MIN_SAMPLES or b_n < MIN_SAMPLES:\n        return False",
+        "    if False:\n        return False",
+    ),
+    (
+        "样本量**量级**闸门失效（3 条样本跟 60 条样本比最低价）",
+        TREND,
+        "    return max(a_n, b_n) <= min(a_n, b_n) * MAX_SAMPLE_RATIO",
+        "    return True",
     ),
     (
         "最新报价兜底退回 low[-1]（basis=new/used 下会把有数据的型号误判成空白）",
@@ -322,8 +332,52 @@ BREAKS: list[tuple[str, pathlib.Path, str, str]] = [
     (
         "涨跌基准退回 dates[-1]（拿昨天价跟今天减 N 天比，区间口径错）",
         TREND,
-        "        prev = _lookup(dates, low, last_date - timedelta(days=period))",
-        "        prev = _lookup(dates, low, dates[-1] - timedelta(days=period))",
+        "        target = last_date - timedelta(days=period)",
+        "        target = dates[-1] - timedelta(days=period)",
+    ),
+    (
+        "**详情页**涨跌幅摘掉闸门（用户看到的「4080 Super 一天涨 44%」就是从这漏的）",
+        TREND,
+        "        if not _comparable(series, last_idx, prev_idx):\n            pct = None",
+        "        if False:\n            pct = None",
+    ),
+    (
+        "稳健序列退回 min（涨跌幅重新被单条引流价主导）",
+        TREND,
+        '            series["all_low_robust"].append(_robust_low(entries))',
+        '            series["all_low_robust"].append(\n'
+        '                min(e.low for e in entries) if entries else None\n'
+        '            )',
+    ),
+    (
+        "稳健底价不卡样本量（单条样本的平台把稳健价拉跑）",
+        TREND,
+        "    strong = [e for e in vals if e.count >= MIN_SAMPLES]",
+        "    strong = list(vals)",
+    ),
+    (
+        "闸门样本量与 p25 样本量解耦（两边尺度不一致 → 假涨跌）",
+        TREND,
+        "MIN_SAMPLES = P25_MIN_SAMPLES",
+        "MIN_SAMPLES = 3",
+    ),
+    (
+        "聚合层不排除嫌疑报价（涡轮卡 / 坏卡 / 引流价重新进行情）",
+        AGGREGATE,
+        '            Listing.quality_flags == "",\n',
+        "",
+    ),
+    (
+        "聚合层不再算稳健底价（p25 恒等于 min）",
+        AGGREGATE,
+        '            "p25_price": _p25(prices),',
+        '            "p25_price": min(prices),',
+    ),
+    (
+        "工业卡标记被摘掉（涡轮 / 工包卡重新冒充零售行情）",
+        QUALITY,
+        '    "涡轮",\n',
+        "",
     ),
     (
         "墙钟兜底退回一次长 sleep（休眠期间计时冻结，一轮可跨 12 小时）",
@@ -453,6 +507,26 @@ def main() -> int:
             except OSError:
                 dirty.append(path)
         return dirty
+
+    # ⚠️ 还原必须挂在**退出路径**上，不能只靠正常流程末尾那一行。
+    #
+    # 2026-10-03 真实踩到：脚本被中断（超时自动转后台 → 被 kill），
+    # `restore()` 根本没执行，于是 `app/services/pipeline.py` 里**残留了
+    # 一条变异**（`_STALE_RUNNING_MINUTES = 45` → `5`）。而下一次跑这个脚本
+    # 时，它先跑"基线自检"，基线就变成 729/731 —— 脚本会打印
+    # 「基线就不是全绿 —— 先修好自检」，指向完全错误的方向（让人去查自检，
+    # 实际是源码被自己改坏了）。
+    #
+    # 所以：atexit + SIGINT/SIGTERM 都挂上 restore。SIGKILL 仍然拦不住，
+    # 但那属于极端情况 —— 遇到时用 `git status` 看有没有源码被改脏。
+    def _bail(signum, _frame):
+        """收到中断信号：先还原源码，再退出。"""
+        restore()
+        raise SystemExit(128 + signum)
+
+    atexit.register(restore)
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(_sig, _bail)
 
     try:
         # ⚠️ 备份集合**从 BREAKS 推导**，不要再手写文件清单。

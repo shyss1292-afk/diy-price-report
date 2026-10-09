@@ -13,7 +13,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="/Users/apple/.workbuddy/binaries/python/envs/diyprice/bin/python"
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/_python.sh"
 LABEL="com.diyprice.tracker"
 COLLECT_LABEL="com.diyprice.collect"
 PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
@@ -198,10 +198,31 @@ case "${1:-}" in
     echo "服务已停止"
     ;;
   restart)
-    unload_service
-    sleep 1
-    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || launchctl load "$PLIST_PATH"
-    echo "服务已重启"
+    # ⚠️ 别退回 "bootout + bootstrap + 打印成功" 那种写法。
+    #
+    # 2026-10-04 实测踩到：`launchctl bootstrap` 偶尔会失败，脚本按 `||` 回落到
+    # `launchctl load`，而 load 对**已经加载过**的 job 是**空操作** ——
+    # 于是它照样打印「服务已重启」，端口上的进程却还是原来那个、跑的还是旧代码。
+    # 我因此白测了两轮（明明改了路由，接口却还是老行为，一度怀疑是装饰器不生效）。
+    #
+    # kickstart -k 的语义是「杀掉并立刻重启」，且结果**可验证**：
+    # 下面强制比对端口 PID，只有真的换了新进程才报成功。
+    old_pid="$(lsof -nP -iTCP:${PORT} -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+    if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
+        launchctl kickstart -k "gui/$(id -u)/${LABEL}"
+    else
+        launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || launchctl load "$PLIST_PATH"
+    fi
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        sleep 0.5
+        new_pid="$(lsof -nP -iTCP:${PORT} -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+        if [ -n "${new_pid}" ] && [ "${new_pid}" != "${old_pid}" ]; then
+            echo "服务已重启（PID ${old_pid:-无} -> ${new_pid}）"
+            exit 0
+        fi
+    done
+    echo "⚠️ 端口上的进程没有变化（PID ${old_pid:-无}）—— 重启**可能没生效**，请核对代码是否已加载"
+    exit 1
     ;;
   status)
     if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then

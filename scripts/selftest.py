@@ -2504,18 +2504,88 @@ def test_market_hygiene() -> None:
     check("聚合层只统计激活平台（Platform.is_active）", "Platform.is_active.is_(True)" in agg)
     check("全量重算时整表清空（否则旧脏行留着 = 没清）",
           "delete(PriceDaily)" in agg and "if since is None" in agg)
+    # ---- 2026-10-03 新增：嫌疑报价不进聚合 + 稳健底价 p25 ----
+    check("聚合层排除嫌疑报价（bundle/defective/industrial）",
+          'Listing.quality_flags == ""' in agg)
+    check("用 == '' 而不是 NOT IN 枚举（新增标记不会被静默放行）",
+          "Listing.quality_flags.in_(" not in agg)
+    check("聚合层算稳健底价 p25（涨跌幅不再只看单点 min）", "_p25(prices)" in agg)
+    # `_p25` 是独立函数，不在 refresh_daily 源码里 —— 必须单独取源码
+    p25_src = inspect.getsource(aggregate._p25)
+    check("p25：样本不足时如实退回 min（不制造虚假的稳健）",
+          "if len(prices) < P25_MIN_SAMPLES" in p25_src)
+    check("p25 用 inclusive 四分位（q1 ≥ min 恒成立）",
+          'quantiles(prices, n=4, method="inclusive")[0]' in p25_src)
+    check("p25 与趋势层闸门**共用同一个样本量常量**（不一致就会造出假涨跌）",
+          "MIN_SAMPLES = P25_MIN_SAMPLES" in inspect.getsource(trend))
 
+    # 闸门已抽成独立函数 `_comparable`（原先只长在 build_snapshot 里，
+    # 详情页的 d1/d7/d30 完全没有保护 —— 用户看到的"4080 Super 一天涨 44%"
+    # 就是从那个没有闸门的出口出来的）。所以断言要分两处锚定：
+    #   ① `_comparable` 本体：三种判据 + 常量
+    #   ② 两个调用方：涨跌榜与详情页**都**必须走它
+    gate = inspect.getsource(trend._comparable)
     tr = inspect.getsource(trend.build_snapshot)
-    check("口径闸门：平台集合 Jaccard ≥ 0.5", "len(a & b) / len(union) >= 0.5" in tr)
-    check("样本量闸门：两天各 ≥3 条", "MIN_SAMPLES = 3" in tr)
-    check("样本量量级相当（≤4 倍）", "min(a_n, b_n) * 4" in tr)
+    cm = inspect.getsource(trend.compute_metrics)
+    cs = inspect.getsource(trend._compute_market_series)
+
+    check("口径闸门：平台集合 Jaccard ≥ MIN_JACCARD",
+          "MIN_JACCARD" in gate and "len(a & b) / len(union) < MIN_JACCARD" in gate)
+    check("样本量闸门：两天样本量 ≥ MIN_SAMPLES",
+          "MIN_SAMPLES = P25_MIN_SAMPLES" in inspect.getsource(trend)
+          and "a_n < MIN_SAMPLES or b_n < MIN_SAMPLES" in gate)
+    check("样本量量级相当（≤ MAX_SAMPLE_RATIO 倍）",
+          "min(a_n, b_n) * MAX_SAMPLE_RATIO" in gate)
     check("不可比时不出涨跌幅（宁可缺不可错）", "if not comparable:" in tr and "pct = None" in tr)
-    # ⚠️ 断言**赋值语句本身**，不能只断言它的组成部分 ——
-    #    变异只替换这一行、保留 Jaccard 那行时，只查组成部分的断言会漏掉
-    #    （实测：这条守卫一度是虚的）。
-    check("三道闸门必须**同时**生效（same_channels + enough + balanced）",
-          "comparable = same_channels and enough and balanced" in tr)
-    check("abs 与 change_pct 同生共死", "comparable and last is not None" in tr)
+    # ⚠️ 三条一起断言：变异掉任一条（比如把 Jaccard 判据换成恒真）都必须被抓住。
+    check("三道闸门必须**同时**生效（口径 + 样本量 + 量级）",
+          all(k in gate for k in ("MIN_JACCARD", "MIN_SAMPLES", "MAX_SAMPLE_RATIO"))
+          and gate.count("return False") >= 3)
+    # ---- 行为层（比文本层强）：真的喂几组 series 进去比结果 ----
+    def _mk(sets: list[frozenset], counts: list[int]) -> dict:
+        return {
+            "platform_ids": sets,
+            "robust_platform_ids": sets,
+            "sample_counts": counts,
+        }
+
+    check("行为：平台集合不重合 → 不可比",
+          trend._comparable(_mk([frozenset({1, 2, 3}), frozenset({3})], [10, 10]), 1, 0)
+          is False)
+    check("行为：两天都只有同一个平台 → **可比**（同为二手口径）",
+          trend._comparable(_mk([frozenset({6}), frozenset({6})], [10, 10]), 1, 0) is True)
+    check("行为：任一天样本量不足 → 不可比",
+          trend._comparable(_mk([frozenset({6}), frozenset({6})], [10, 2]), 1, 0) is False)
+    check("行为：样本量量级差超 4 倍 → 不可比",
+          trend._comparable(_mk([frozenset({6}), frozenset({6})], [21, 5]), 1, 0) is False)
+    check("行为：下标缺失（该天无数据）→ 不可比",
+          trend._comparable(_mk([frozenset({6})], [10]), 0, None) is False)
+
+    # 两个入口都必须接上闸门 —— 少了详情页那个，44% 的假信号就会从那儿漏出去
+    check("涨跌榜（build_snapshot）接上了闸门", "_comparable(series, idx, prev_idx)" in tr)
+    check("**详情页（compute_metrics）也接上了闸门**（原先漏在这里）",
+          "_comparable(series, last_idx, prev_idx)" in cm)
+    check("详情页涨跌幅用**稳健序列**（不是 min）",
+          "_pct(last_robust, prev)" in cm and "robust: list[float | None]" in cm)
+    # abs 与 pct 必须**同源**（都用稳健序列）。不同源时界面会出现
+    # "涨跌额 ¥370 但百分比 1%" 这种凑不出来的组合。
+    check("abs 与 change_pct 同源（都用稳健序列）",
+          "(robust[idx] - robust[prev_idx])" in tr)
+    check("不可比时 abs 与 change_pct 一起消失",
+          '"change_pct": None if pct is None else' in tr)
+
+    # ---- 稳健底价：样本不足的平台不得参与跨平台取 min ----
+    # 实测 RTX 5060 Ti 16G：京东只有 1 条 ¥3349（p25 退回 min），闲鱼 19 条
+    # 的真 p25 是 ¥4425 —— 不卡样本量的话，"现价在涨、涨跌幅在跌"就会同时出现。
+    rb = inspect.getsource(trend._robust_low)
+    check("稳健底价只在**样本足够**的平台之间取 min",
+          "if e.count >= MIN_SAMPLES" in rb)
+    check("一个够样本的平台都没有时返回 None（不退回 min）",
+          "if strong else None" in rb)
+    check("稳健序列用的是 _robust_low（不是裸 min）",
+          "_robust_low(entries)" in cs and "_robust_low(new_vals)" in cs)
+    check("闸门比的是**有效平台集合**（样本够算 p25 的），不是所有平台",
+          'series.get("robust_platform_ids")' in gate)
 
     cs = inspect.getsource(trend._compute_market_series)
     check("序列记录每天的平台集合", 'series["platform_ids"]' in cs)
@@ -2552,8 +2622,11 @@ def test_latest_quote_fallback() -> None:
     # ⚠️ 断言要精确到**那一行赋值**。只查子串 `last_date - timedelta(days=period)`
     #    会被同文件的 `prev_idx = _lookup_idx(...)` 那一行喂饱，
     #    变异改掉 prev 那行时守卫照样通过（实测踩过）。
+    # 重构成"先算出 prev_idx，再分别取显示价与稳健价"后，基准日期的计算
+    # 落在 `target = last_date - timedelta(days=period)` 这一行上。
     check("涨跌基准跟数据日期走，不是跟今天走",
-          "prev = _lookup(dates, low, last_date - timedelta(days=period))" in src)
+          "target = last_date - timedelta(days=period)" in src
+          and "prev_idx = _lookup_idx(dates, target)" in src)
     check("全 None 时跳过该型号（不产出空行）", "if idx is None:" in src)
 
     # 前端：徽标函数必须存在且两个页面都在用
@@ -4082,11 +4155,64 @@ def test_quote_quality_flags() -> None:
     check(f"defective：{len(FALSE_ALARMS)} 条正常商品一条都不能误标（误杀回归）",
           not bad, "; ".join(bad))
 
+    # ---- industrial：工业 / 非零售渠道卡（2026-10-03 新增）----
+    #
+    # 成因：用户问「4080 Super 16G 一天涨了 44%」。京东 10-02 那轮采到的 3 条
+    # 全是涡轮 / 工包卡（¥9800 / ¥11515 / ¥15000），而 09-30 那条是零售卡
+    # （影驰金属大师 ¥7039）—— 最低价"换人"了，就被读成 +39%（d7 用 09-25 的
+    # 技嘉 ¥6799 做基准 = +44.14%）。
+    #
+    # ⚠️ 同样按项目方法论做**逐词隔离**：每条样本只含它对应的那一个受测词。
+    INDUSTRIAL_WORDS_ISOLATED = [
+        ("涡轮", "英伟达RTX 4080 Super涡轮显卡 双宽散热 全新"),
+        ("工包", "讯景RX7900XT PRO 20G 海外版工包 全新未拆"),
+        ("工业包装", "英伟达RTX 5060 Ti 16G 【工业包装】 全新未拆封"),
+        ("深度学习", "RTX5080 16G深度学习加速卡 全新"),
+        ("计算显卡", "浩海宏图 RTX4080S 16G 计算显卡 10240CUDA核心"),
+        ("服务器显卡", "英伟达RTX 3090 24G单卡服务器显卡 PCIe 3.0 大显存"),
+        ("服务器专用", "英RTX 4090 24G 显卡 双宽度单风扇多卡GPU服务器专用"),
+    ]
+    miss_i = [
+        f"{w} → {Q.classify(t)}"
+        for w, t in INDUSTRIAL_WORDS_ISOLATED
+        if "industrial" not in Q.classify(t)
+    ]
+    check(
+        f"industrial：{len(INDUSTRIAL_WORDS_ISOLATED)} 个词逐个单独命中（隔离用例）",
+        not miss_i,
+        "; ".join(miss_i),
+    )
+
+    # ⚠️ 误杀回归 —— 这两个词实测误杀严重，**不得**收进词表
+    check("industrial：不收「公版」（245 条里大量是正常零售公版卡）",
+          "industrial" not in Q.classify(
+              "AMD 全新RX7900XTX 公版显卡24G大显存 AI渲染机高性能电竞显卡"))
+    check("industrial：不收「专业显卡」（是普通游戏卡的营销词）",
+          "industrial" not in Q.classify(
+              "华硕（ASUS）电竞TUF RTX5070 系列游戏显卡 台式 电竞专业显卡 雪豹DUAL"))
+    check("industrial：正常零售卡不标（否则会把整个型号的行情剔空）",
+          Q.classify("技嘉（GIGABYTE）GeForce RTX 4080 SUPER WINDFORCE OC 16G 显卡") == ())
+
+    # ---- 残次 CPU：内存只能单通道 ----
+    # 实测 Ryzen 9 9950X3D 有一条 ¥2400 的「只能单通道使用」被当成最低价，
+    # 次日样本恢复正常后算出 +45.83% 的假暴涨。
+    check("defective：残次 CPU「单通道」被判（假暴涨的成因）",
+          "defective" in Q.classify(
+              "AMD Ryzen 9 9950X3D 拆机，功能正常，核显正常，只能单通道使用，成色如图"))
+    check("defective：不收「蓝屏 / 花屏 / 掉驱动 / 有维修」（否定式占绝大多数）",
+          all("defective" not in Q.classify(t) for t in (
+              "自用i5-12400F 无蓝屏无花屏不掉驱动，成色好",
+              "RX6600 8G 使用正常不蓝屏，无维修无拆修",
+          )))
+
     # ---- is_suspect 的两种输入形态 ----
     check("is_suspect 吃字符串（从库里读出的形式）",
           Q.is_suspect("bundle") and Q.is_suspect("defective,bundle")
+          and Q.is_suspect("industrial") and Q.is_suspect("bundle,industrial")
           and not Q.is_suspect("") and not Q.is_suspect(None))
     check("is_suspect 吃序列", Q.is_suspect(("defective",)) and not Q.is_suspect(()))
+    check("SUSPECT_FLAGS 是三类的**单一来源**（聚合/趋势/日报共用它）",
+          Q.SUSPECT_FLAGS == frozenset({"bundle", "defective", "industrial"}))
 
     # ---- 接线 ----
     pl = pathlib.Path("app/services/pipeline.py").read_text(encoding="utf-8")
@@ -4097,8 +4223,85 @@ def test_quote_quality_flags() -> None:
     db = pathlib.Path("app/db.py").read_text(encoding="utf-8")
     check("迁移登记了 listings.quality_flags",
           '("listings", "quality_flags"' in db)
+    check("迁移登记了 price_daily.p25_price",
+          '("price_daily", "p25_price"' in db)
     md = pathlib.Path("app/models.py").read_text(encoding="utf-8")
     check("模型有 quality_flags 列", "quality_flags: Mapped[str]" in md)
+    check("模型有 p25_price 列", "p25_price: Mapped[float]" in md)
+
+    # ---- 回填脚本必须存在（规则升级要能作用到历史数据）----
+    bf = pathlib.Path("scripts/backfill_quality.py")
+    check("有质量标记回填脚本", bf.exists())
+    if bf.exists():
+        bs = bf.read_text(encoding="utf-8")
+        check("回填默认**只统计不写盘**（要 --apply 才落盘）", '"--apply" in sys.argv' in bs)
+        check("回填写完后**回读库**校验（不信内存里的统计）",
+              "回读" in bs and "Listing.quality_flags != \"\"" in bs)
+
+
+def test_build_assistant() -> None:
+    """装机助手（配置单 + 实时总价）。
+
+    核心不是"功能有没有"，而是**取价口径不能退回单点最低价**。
+
+    2026-10-04 实测：RTX 5060 Ti 16G 在闲鱼的最低价是 ¥2300，而当天真实行情
+    约 ¥4400 —— 那条的标题是「技嘉 **RX6800** 超级雕 16G …**换了 5060Ti 故出**」，
+    卖的其实是 RX 6800，只因为句子里提到"5060Ti"就被归到这个型号名下。
+    这类"提到但不是在卖"的错配**词表抓不到**（既不是坏卡也不是捆绑），
+    只能靠分位统计挡。用它算总价，整套配置会凭空便宜两千块。
+    """
+    import inspect
+    import pathlib as _pl
+
+    from app.services import builds
+
+    src = inspect.getsource(builds._price_cells)
+    check("配置单取 **p25 稳健价**（不是单点最低价）",
+          "PriceDaily.p25_price.label" in src)
+    check("稳健价为 0 时如实退回 min（老数据未重算时不会变成 ¥0）",
+          "if p25 and float(p25) > 0 else None" in src)
+    check("同时透出真实最低挂牌 —— 只作提示，不参与总价",
+          '"low": round' in src)
+
+    ser = inspect.getsource(builds.serialize)
+    check("缺价件数单独透出（否则总价会悄悄偏低，用户以为够了）",
+          '"missing_count"' in ser)
+    check("总价只在**有价**时给出（全缺价 → None，不是 0）",
+          "round(total, 2) if priced else None" in ser)
+    check("「总价是否完整」显式给出", '"total_complete"' in ser)
+
+    # 行为层：_best_of 真的按 price 取最小，且空输入不抛
+    check("行为：_best_of 取 price 最小的平台",
+          builds._best_of({"jd": {"price": 100.0}, "xianyu": {"price": 80.0}})["price"] == 80.0)
+    check("行为：_best_of 空输入返回 None（不抛异常）",
+          builds._best_of({}) is None)
+
+    # ---- 路由：路径不能互相遮蔽 ----
+    rt = _pl.Path("app/api/routes.py").read_text(encoding="utf-8")
+    check("配件操作用独立前缀 /build-items/（不被 /builds/{build_id} 抢先匹配）",
+          '"/build-items/{item_id}"' in rt)
+    # ⚠️ 必须锚定**装饰器那一行**，不能用裸子串 ——
+    #    文件里有一条注释正好在讲"不要用 /builds/{build_id}/items/{item_id}"，
+    #    裸子串匹配会命中注释，断言变成永远失败（这次就是这么踩的）。
+    check("不存在会互相遮蔽的嵌套路由（锚定装饰器行）",
+          '@router.patch("/builds/{build_id}/items/{item_id}")' not in rt
+          and '@router.delete("/builds/{build_id}/items/{item_id}")' not in rt
+          and '@router.get("/builds/{build_id}/items/{item_id}")' not in rt)
+
+    # ---- 安全红线：默认绝不能绑 0.0.0.0 ----
+    cfgs = _pl.Path("app/config.py").read_text(encoding="utf-8")
+    check("默认监听回环（服务无鉴权，不能默认对外）",
+          'os.environ.get("DIYPRICE_HOST", "127.0.0.1")' in cfgs)
+
+    # ---- 页面接线 ----
+    mf = _pl.Path("app/main.py").read_text(encoding="utf-8")
+    check("注册了 /build 页面", '"/build": "build.html"' in mf)
+    check("页面与脚本文件都在", _pl.Path("web/build.html").exists()
+          and _pl.Path("web/js/build.js").exists())
+    bj = _pl.Path("web/js/build.js").read_text(encoding="utf-8")
+    # 实测踩过：只认 getAttribute('data-act') 会让"点名字不展开"（子元素没有该属性）
+    check("卡片点击用 closest 判区域（而不是只看 target 的 data-act）",
+          "t.closest('[data-act=\"toggle\"]')" in bj)
 
 
 def test_registry_is_clean() -> None:
@@ -4151,6 +4354,7 @@ def main() -> int:
         test_preflight_probes_targets,
         test_mock_not_in_default_round,
         test_quote_quality_flags,
+        test_build_assistant,
         test_registry_is_clean,
         test_failure_triage,
         test_breaker_auth_channel,
