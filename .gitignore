@@ -30,8 +30,10 @@ data/
 __pycache__/
 *.py[cod]
 *.egg-info/
-.venv/
-venv/
+# ⚠️ 不带斜杠：带斜杠只匹配**目录**，匹配不到本机为兼容
+#    _python.sh 建的 .venv **软链**（软链会被误提交进仓库）。
+.venv
+venv
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
