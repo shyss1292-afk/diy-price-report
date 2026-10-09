@@ -3,9 +3,10 @@
 #
 # 为什么必须抽出来
 # ---------------
-# 原先 5 个脚本各自硬编码 `/Users/apple/.workbuddy/binaries/python/envs/diyprice/bin/python`
-# —— 那是**作者本机**的路径。别人 clone 下来这些脚本直接跑不了，而且失败信息
-# 只是一句 "No such file or directory"，看不出是路径问题。
+# 原先 5 个脚本各自硬编码了**作者本机的 venv 绝对路径**（形如
+# `/Users/<用户名>/.workbuddy/.../envs/<env>/bin/python`）。别人 clone 下来
+# 这些脚本直接跑不了，而且失败信息只有一句 `No such file or directory`，
+# 看不出是路径问题。
 #
 # 解析顺序（从具体到通用）：
 #   1. $DIYPRICE_PYTHON     —— 显式指定，最高优先级（部署/CI 里常用）
